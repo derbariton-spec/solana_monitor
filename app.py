@@ -262,7 +262,7 @@ with st.sidebar:
     jitosol_amount = st.number_input(
         "JitoSOL Bestand",
         min_value=0.0,
-        value=0,
+        value=0.0,
         step=0.01,
         format="%.5f"
     )
@@ -270,7 +270,7 @@ with st.sidebar:
     sol_equivalent = st.number_input(
         "≈ SOL Gegenwert",
         min_value=0.0,
-        value=0,
+        value=0.0,
         step=0.01,
         format="%.2f"
     )
@@ -278,7 +278,7 @@ with st.sidebar:
     avg_entry_jitosol = st.number_input(
         "Ø Einstieg JitoSOL USD",
         min_value=0.0,
-        value=0,
+        value=0.0,
         step=0.01,
         format="%.2f"
     )
@@ -286,7 +286,7 @@ with st.sidebar:
     historical_sol_entry = st.number_input(
         "Historischer SOL-Einstieg USD",
         min_value=0.0,
-        value=0,
+        value=0.0,
         step=1.0,
         format="%.2f"
     )
