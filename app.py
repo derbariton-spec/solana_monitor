@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -40,6 +42,118 @@ def fmt_num(value, decimals=2) -> str:
         return "n/a"
 
     return f"{float(value):,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def fmt_pct(value, decimals=2) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):+,.{decimals}f}%".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def fmt_datetime_utc(dt) -> str:
+    if dt is None:
+        return "n/a"
+    try:
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return "n/a"
+
+
+def safe_float(value, fallback=0.0) -> float:
+    try:
+        if value is None or pd.isna(value):
+            return float(fallback)
+        return float(value)
+    except Exception:
+        return float(fallback)
+
+
+@st.cache_data(ttl=30)
+def fetch_live_market_data() -> dict:
+    """
+    Lädt Live-Marktdaten von CoinGecko.
+    Der Cache läuft nur 30 Sekunden, damit der Kurs quasi live bleibt,
+    ohne die API bei jedem Streamlit-Rerun zu überlasten.
+    """
+    url = (
+        "https://api.coingecko.com/api/v3/simple/price"
+        "?ids=solana,jito-staked-sol,bitcoin"
+        "&vs_currencies=usd,eur"
+        "&include_24hr_change=true"
+        "&include_market_cap=true"
+        "&include_24hr_vol=true"
+    )
+
+    try:
+        response = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "solana-fundamental-monitor/2.0"},
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        sol = data.get("solana", {})
+        jitosol = data.get("jito-staked-sol", {})
+        btc = data.get("bitcoin", {})
+
+        return {
+            "ok": True,
+            "error": None,
+            "last_update": datetime.now(timezone.utc),
+            "sol_usd_live": sol.get("usd"),
+            "sol_eur_live": sol.get("eur"),
+            "sol_24h_change": sol.get("usd_24h_change"),
+            "sol_market_cap": sol.get("usd_market_cap"),
+            "sol_volume_24h": sol.get("usd_24h_vol"),
+            "jitosol_usd_live": jitosol.get("usd"),
+            "jitosol_eur_live": jitosol.get("eur"),
+            "jitosol_24h_change": jitosol.get("usd_24h_change"),
+            "btc_usd_live": btc.get("usd"),
+            "btc_eur_live": btc.get("eur"),
+            "btc_24h_change": btc.get("usd_24h_change"),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "last_update": datetime.now(timezone.utc),
+        }
+
+
+def build_thesis_commentary(result: dict, latest, live: dict, past_available: bool) -> str:
+    """Einfache regelbasierte Tages-Einschätzung ohne externen KI-Key."""
+    status = result.get("status", "neutral")
+    score = safe_float(result.get("score"), 50)
+    sol_change = live.get("sol_24h_change")
+    rwa = safe_float(latest.get("rwa_usd"), 0)
+    stable = safe_float(latest.get("stablecoins_usd"), 0)
+    tvl = safe_float(latest.get("tvl_usd"), 0)
+
+    parts = []
+    if status == "intakt" or score >= 70:
+        parts.append("Die Investmentthese wirkt aktuell intakt.")
+    elif status == "geschwaecht" or score < 40:
+        parts.append("Die Investmentthese wirkt aktuell geschwächt und sollte genauer geprüft werden.")
+    else:
+        parts.append("Die Investmentthese wirkt aktuell neutral, weil noch nicht genug Verlauf vorliegt oder die Signale gemischt sind.")
+
+    if rwa >= 1_000_000_000:
+        parts.append("RWA liegt weiterhin im Milliardenbereich und bleibt damit ein zentraler Baustein der Solana-Finanzinfrastruktur-These.")
+    if stable >= 10_000_000_000:
+        parts.append("Die Stablecoin-Basis ist groß genug, um echte Finanzanwendungen zu tragen.")
+    if tvl >= 4_000_000_000:
+        parts.append("Das TVL bleibt auf relevantem Niveau, auch wenn kurzfristige Schwankungen normal sind.")
+    if sol_change is not None:
+        if sol_change > 3:
+            parts.append("Der Live-Kurs zeigt kurzfristig relative Stärke.")
+        elif sol_change < -3:
+            parts.append("Der Live-Kurs steht kurzfristig unter Druck; das ist aber nicht automatisch eine fundamentale Verschlechterung.")
+
+    if not past_available:
+        parts.append("Die 30-Tage-Ampel wird aussagekräftiger, sobald mehr tägliche Historie gesammelt wurde.")
+
+    return " ".join(parts)
 
 
 def pct_delta(latest, prev, key):
@@ -251,6 +365,21 @@ result = compute_fundamental_score(current_dict, past_dict)
 sol_usd = float(latest.get("sol_usd") or 0)
 sol_btc = float(latest.get("sol_btc") or 0)
 
+# Live-Marktdaten: unabhängig vom täglichen Fundamentaldaten-Snapshot
+live = fetch_live_market_data()
+sol_usd_live = safe_float(live.get("sol_usd_live"), sol_usd)
+sol_eur_live = live.get("sol_eur_live")
+sol_24h_change = live.get("sol_24h_change")
+sol_market_cap_live = live.get("sol_market_cap")
+sol_volume_24h_live = live.get("sol_volume_24h")
+jitosol_usd_live = live.get("jitosol_usd_live")
+jitosol_eur_live = live.get("jitosol_eur_live")
+jitosol_24h_change = live.get("jitosol_24h_change")
+btc_usd_live = live.get("btc_usd_live")
+btc_eur_live = live.get("btc_eur_live")
+btc_24h_change = live.get("btc_24h_change")
+live_last_update = live.get("last_update")
+
 
 # ------------------------------------------------------------
 # Sidebar: Deine Position
@@ -291,9 +420,12 @@ with st.sidebar:
         format="%.2f"
     )
 
-    # JitoSOL-Preis automatisch aus SOL/USD und JitoSOL/SOL-Verhältnis
+    # JitoSOL-Preis bevorzugt live von CoinGecko; Fallback über SOL/USD × JitoSOL/SOL-Verhältnis
     jitosol_sol_ratio = sol_equivalent / jitosol_amount if jitosol_amount else 0
-    current_jitosol_price = jitosol_sol_ratio * sol_usd
+    if jitosol_usd_live:
+        current_jitosol_price = float(jitosol_usd_live)
+    else:
+        current_jitosol_price = jitosol_sol_ratio * sol_usd_live
 
     value_now = jitosol_amount * current_jitosol_price
     cost_basis = jitosol_amount * avg_entry_jitosol
@@ -334,23 +466,33 @@ with st.sidebar:
 score = float(result["score"])
 status_icon = "🟢" if result["status"] == "intakt" else "🔴" if result["status"] == "geschwaecht" else "🟡"
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 
 c1.metric("Thesis Status", f"{status_icon} {result['status'].capitalize()}")
 c2.metric("Fundamental Score", f"{score:.0f}/100")
 c3.metric(
-    "SOL/USD",
-    f"{sol_usd:.2f} $",
-    None if prev is None else f"{pct_delta(latest, prev, 'sol_usd'):+.1f}%"
+    "SOL/USD Live",
+    f"{sol_usd_live:.2f} $",
+    None if sol_24h_change is None else fmt_pct(sol_24h_change) + " 24h"
 )
 c4.metric(
+    "SOL/EUR Live",
+    "n/a" if sol_eur_live is None else f"{float(sol_eur_live):.2f} €"
+)
+c5.metric(
     "SOL/BTC",
     f"{sol_btc:.6f}",
     None if prev is None else f"{pct_delta(latest, prev, 'sol_btc'):+.1f}%"
 )
 
+if live.get("error"):
+    st.warning(f"Live-Marktdaten konnten nicht geladen werden: {live.get('error')}")
+elif live_last_update:
+    st.caption(f"Live-Kurs zuletzt abgefragt: {fmt_datetime_utc(live_last_update)}")
+
 st.progress(max(0, min(int(score), 100)) / 100)
 st.info(interpretation_text(result))
+st.success(build_thesis_commentary(result, latest, live, past is not None))
 
 
 # ------------------------------------------------------------
@@ -449,23 +591,59 @@ with fundamentals:
 # ------------------------------------------------------------
 
 with market:
-    st.subheader("Marktumfeld")
+    st.subheader("Live-Markt")
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
 
-    m1.metric("BTC/USD", fmt_usd(latest.get("btc_usd")))
+    m1.metric(
+        "SOL/USD Live",
+        f"{sol_usd_live:.2f} $",
+        None if sol_24h_change is None else fmt_pct(sol_24h_change) + " 24h"
+    )
+
+    m2.metric(
+        "SOL/EUR Live",
+        "n/a" if sol_eur_live is None else f"{float(sol_eur_live):.2f} €"
+    )
+
+    m3.metric(
+        "JitoSOL/USD Live",
+        "n/a" if jitosol_usd_live is None else f"{float(jitosol_usd_live):.2f} $",
+        None if jitosol_24h_change is None else fmt_pct(jitosol_24h_change) + " 24h"
+    )
+
+    if jitosol_usd_live and sol_usd_live:
+        jito_premium = (float(jitosol_usd_live) / float(sol_usd_live) - 1) * 100
+        m4.metric("JitoSOL Premium", fmt_pct(jito_premium))
+    else:
+        m4.metric("JitoSOL Premium", "n/a")
+
+    st.divider()
+
+    x1, x2, x3, x4 = st.columns(4)
+
+    x1.metric("SOL Market Cap", fmt_usd(sol_market_cap_live))
+    x2.metric("SOL Volumen 24h", fmt_usd(sol_volume_24h_live))
+    x3.metric(
+        "BTC/USD Live",
+        fmt_usd(btc_usd_live),
+        None if btc_24h_change is None else fmt_pct(btc_24h_change) + " 24h"
+    )
+    x4.metric("SOL/BTC", f"{sol_btc:.6f}")
 
     btc_dom = latest.get("btc_dominance")
-    m2.metric(
-        "BTC Dominanz",
+    st.metric(
+        "BTC Dominanz (täglicher Snapshot)",
         "n/a" if pd.isna(btc_dom) else f"{float(btc_dom):.1f}%"
     )
 
-    m3.metric("SOL/BTC", f"{sol_btc:.6f}")
+    if live_last_update:
+        st.caption(f"Live-Daten zuletzt abgefragt: {fmt_datetime_utc(live_last_update)}")
 
     st.caption(
         "SOL/BTC ist für deine These wichtig: Es zeigt, ob Solana relativ "
-        "zu Bitcoin Stärke aufbaut."
+        "zu Bitcoin Stärke aufbaut. Der SOL/USD- und JitoSOL-Kurs oben ist live; "
+        "die Fundamentaldaten darunter kommen aus dem täglichen GitHub-Workflow."
     )
 
 
