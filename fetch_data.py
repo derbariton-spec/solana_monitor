@@ -1,6 +1,6 @@
-"""Taeglicher Datensammler fuer den Solana Fundamental Monitor 2.0.
+"""Taeglicher Datensammler fuer den Solana Fundamental Monitor 2.1.
 
-Laeuft lokal oder auf einem Server:
+Laeuft lokal oder per GitHub Actions:
     python3 fetch_data.py
 
 Speicherlogik:
@@ -18,11 +18,13 @@ from dotenv import load_dotenv
 
 from data_sources import (
     fetch_active_addresses,
+    fetch_app_fees_usd,
+    fetch_app_revenue_usd,
     fetch_btc_dominance,
+    fetch_chain_fees_usd,
+    fetch_chain_revenue_usd,
     fetch_dex_volume_usd,
-    fetch_fees_usd,
     fetch_price,
-    fetch_revenue_usd,
     fetch_rwa_usd,
     fetch_stablecoins_usd,
     fetch_tvl_usd,
@@ -59,8 +61,13 @@ def main():
     stablecoins_usd = fetch_stablecoins_usd()
     rwa_usd = fetch_rwa_usd()
     dex_volume_usd = fetch_dex_volume_usd()
-    fees_usd = fetch_fees_usd()
-    revenue_usd = fetch_revenue_usd()
+
+    # DeFiLlama trennt App Fees/App Revenue von Chain Fees/Chain Revenue.
+    app_fees_usd = fetch_app_fees_usd()
+    app_revenue_usd = fetch_app_revenue_usd()
+    chain_fees_usd = fetch_chain_fees_usd()
+    chain_revenue_usd = fetch_chain_revenue_usd()
+
     btc_dominance = fetch_btc_dominance()
     active_addresses = fetch_active_addresses()
     tvl_sol = (tvl_usd / sol_usd) if tvl_usd and sol_usd else None
@@ -75,8 +82,17 @@ def main():
         "stablecoins_usd": stablecoins_usd,
         "rwa_usd": rwa_usd,
         "dex_volume_usd": dex_volume_usd,
-        "fees_usd": fees_usd,
-        "revenue_usd": revenue_usd,
+
+        # Rueckwaertskompatibel fuer App/Score:
+        "fees_usd": app_fees_usd,
+        "revenue_usd": app_revenue_usd,
+
+        # Neue explizite Felder:
+        "app_fees_usd": app_fees_usd,
+        "app_revenue_usd": app_revenue_usd,
+        "chain_fees_usd": chain_fees_usd,
+        "chain_revenue_usd": chain_revenue_usd,
+
         "active_addresses": active_addresses,
     }
 
@@ -100,6 +116,9 @@ def main():
     upsert_row(row)
 
     print(f"[{today}] Gespeichert. Score: {result['score']}/100 ({result['status']})")
+    print("Werte:")
+    for key, value in current.items():
+        print(f"  {key}: {value}")
     print(interpretation_text(result))
 
 
