@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import requests
 import streamlit as st
+
+try:
+    import plotly.graph_objects as go
+except Exception:
+    go = None
 from dotenv import load_dotenv
 
 from config import APP_TITLE, WATCHLIST_JSON
@@ -143,54 +148,107 @@ def fetch_live_market_data() -> dict:
         }
 
 
+COINBASE_CANDLE_GRANULARITIES = {
+    "1 Minute": 60,
+    "5 Minuten": 300,
+    "15 Minuten": 900,
+    "1 Stunde": 3600,
+    "6 Stunden": 21600,
+    "1 Tag": 86400,
+}
+
+COINBASE_RANGE_DAYS = {
+    "1 Tag": 1,
+    "7 Tage": 7,
+    "30 Tage": 30,
+    "90 Tage": 90,
+    "1 Jahr": 365,
+}
+
+
+def _coinbase_iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 @st.cache_data(ttl=60)
-def fetch_sol_usd_chart(range_label: str = "7 Tage") -> pd.DataFrame:
+def fetch_coinbase_candles(product_id: str = "SOL-USD", days: int = 7, granularity: int = 3600) -> pd.DataFrame:
     """
-    Lädt SOL/USD-Kerzen von Coinbase Exchange und gibt einen DataFrame
-    mit Zeitstempel und Schlusskurs zurück.
+    Lädt OHLC-Kerzen von Coinbase Exchange.
+    Coinbase liefert pro Anfrage maximal ca. 300 Kerzen; deshalb wird in Blöcken abgefragt.
+    Rückgabe-Spalten: time, low, high, open, close, volume
     """
-    settings = {
-        "1 Tag": {"days": 1, "granularity": 300},       # 5-Minuten-Kerzen
-        "7 Tage": {"days": 7, "granularity": 3600},     # 1-Stunden-Kerzen
-        "30 Tage": {"days": 30, "granularity": 21600},  # 6-Stunden-Kerzen
-        "90 Tage": {"days": 90, "granularity": 86400},  # Tageskerzen
-    }
-
-    cfg = settings.get(range_label, settings["7 Tage"])
-
     end = datetime.now(timezone.utc)
-    start = end - timedelta(days=cfg["days"])
+    start = end - pd.Timedelta(days=days)
+    max_points_per_request = 280
+    step = pd.Timedelta(seconds=granularity * max_points_per_request)
 
-    url = "https://api.exchange.coinbase.com/products/SOL-USD/candles"
-    params = {
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "granularity": cfg["granularity"],
-    }
+    rows = []
+    cursor = start
+    headers = {"User-Agent": "solana-fundamental-monitor/2.0"}
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=15,
-        headers={"User-Agent": "solana-fundamental-monitor/2.0"},
+    while cursor < end:
+        chunk_end = min(cursor + step, end)
+        url = f"https://api.exchange.coinbase.com/products/{product_id}/candles"
+        params = {
+            "granularity": granularity,
+            "start": _coinbase_iso(cursor.to_pydatetime() if hasattr(cursor, 'to_pydatetime') else cursor),
+            "end": _coinbase_iso(chunk_end.to_pydatetime() if hasattr(chunk_end, 'to_pydatetime') else chunk_end),
+        }
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, list):
+                rows.extend(data)
+        except Exception:
+            # Einzelne fehlerhafte Blöcke ignorieren, damit die App nicht komplett abstürzt.
+            pass
+        cursor = chunk_end
+
+    if not rows:
+        return pd.DataFrame(columns=["time", "low", "high", "open", "close", "volume"])
+
+    df_candles = pd.DataFrame(rows, columns=["timestamp", "low", "high", "open", "close", "volume"])
+    df_candles = df_candles.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+    df_candles["time"] = pd.to_datetime(df_candles["timestamp"], unit="s", utc=True)
+    for col in ["low", "high", "open", "close", "volume"]:
+        df_candles[col] = pd.to_numeric(df_candles[col], errors="coerce")
+    return df_candles[["time", "low", "high", "open", "close", "volume"]].dropna()
+
+
+def render_candlestick_chart(candles: pd.DataFrame, title: str = "SOL/USD Candlestick Chart"):
+    if candles.empty:
+        st.warning("Keine Candle-Daten gefunden. Bitte später erneut versuchen oder einen anderen Zeitraum wählen.")
+        return
+
+    if go is None:
+        st.warning("Plotly ist nicht installiert. Bitte `plotly>=5.24.0` in requirements.txt ergänzen.")
+        fallback = candles.set_index("time")[["close"]]
+        st.line_chart(fallback)
+        return
+
+    fig = go.Figure(
+        data=[
+            go.Candlestick(
+                x=candles["time"],
+                open=candles["open"],
+                high=candles["high"],
+                low=candles["low"],
+                close=candles["close"],
+                name="SOL/USD",
+            )
+        ]
     )
-    response.raise_for_status()
-
-    candles = response.json()
-
-    if not candles:
-        return pd.DataFrame(columns=["time", "close"])
-
-    chart_df = pd.DataFrame(
-        candles,
-        columns=["timestamp", "low", "high", "open", "close", "volume"],
+    fig.update_layout(
+        title=title,
+        xaxis_title="Zeit",
+        yaxis_title="Preis in USD",
+        height=560,
+        margin=dict(l=10, r=10, t=50, b=10),
+        xaxis_rangeslider_visible=False,
     )
+    st.plotly_chart(fig, use_container_width=True)
 
-    chart_df["time"] = pd.to_datetime(chart_df["timestamp"], unit="s", utc=True)
-    chart_df = chart_df.sort_values("time")
-    chart_df["close"] = pd.to_numeric(chart_df["close"], errors="coerce")
-
-    return chart_df[["time", "close"]].dropna()
 
 
 def build_thesis_commentary(result: dict, latest, live: dict, past_available: bool) -> str:
@@ -464,12 +522,12 @@ with st.sidebar:
         format="%.5f"
     )
 
-    sol_equivalent = st.number_input(
-        "≈ SOL Gegenwert",
+    additional_sol = st.number_input(
+        "Zusätzliche SOL (optional)",
         min_value=0.0,
         value=0.0,
         step=0.01,
-        format="%.2f"
+        format="%.5f"
     )
 
     avg_entry_jitosol = st.number_input(
@@ -488,30 +546,75 @@ with st.sidebar:
         format="%.2f"
     )
 
-    # JitoSOL-Preis bevorzugt live von CoinGecko; Fallback über SOL/USD × JitoSOL/SOL-Verhältnis
-    jitosol_sol_ratio = sol_equivalent / jitosol_amount if jitosol_amount else 0
-    if jitosol_usd_live:
-        current_jitosol_price = float(jitosol_usd_live)
+    entry_jitosol_sol_ratio = st.number_input(
+        "Einstiegs-Umtauschkurs JitoSOL/SOL",
+        min_value=0.0,
+        value=1.0,
+        step=0.0001,
+        format="%.4f",
+        help="Optional: Der JitoSOL/SOL-Umtauschkurs zum Kaufzeitpunkt. Für grobe Staking-Schätzung kann 1,0000 stehen bleiben."
+    )
+
+    # JitoSOL-Umtauschkurs live aus CoinGecko: JitoSOL/USD geteilt durch SOL/USD.
+    if jitosol_usd_live and sol_usd_live:
+        jitosol_sol_ratio_live = float(jitosol_usd_live) / float(sol_usd_live)
     else:
-        current_jitosol_price = jitosol_sol_ratio * sol_usd_live
+        jitosol_sol_ratio_live = 0.0
 
-    value_now = jitosol_amount * current_jitosol_price
+    current_jitosol_price_usd = float(jitosol_usd_live) if jitosol_usd_live else jitosol_sol_ratio_live * sol_usd_live
+    current_jitosol_price_eur = float(jitosol_eur_live) if jitosol_eur_live else None
+
+    jitosol_value_usd = jitosol_amount * current_jitosol_price_usd
+    jitosol_value_eur = jitosol_amount * current_jitosol_price_eur if current_jitosol_price_eur else None
+
+    additional_sol_value_usd = additional_sol * sol_usd_live
+    additional_sol_value_eur = additional_sol * float(sol_eur_live) if sol_eur_live else None
+
+    value_now_usd = jitosol_value_usd + additional_sol_value_usd
+    value_now_eur = (jitosol_value_eur or 0) + (additional_sol_value_eur or 0) if (jitosol_value_eur is not None or additional_sol_value_eur is not None) else None
+
     cost_basis = jitosol_amount * avg_entry_jitosol
-    pnl = value_now - cost_basis
-    pnl_pct = (value_now / cost_basis - 1) * 100 if cost_basis else 0
+    pnl = value_now_usd - cost_basis
+    pnl_pct = (value_now_usd / cost_basis - 1) * 100 if cost_basis else 0
 
-    st.metric("Aktueller JitoSOL Preis", fmt_usd(current_jitosol_price))
-    st.caption(f"1 JitoSOL ≈ {jitosol_sol_ratio:.4f} SOL")
+    current_sol_equivalent_from_jito = jitosol_amount * jitosol_sol_ratio_live if jitosol_sol_ratio_live else 0.0
+    total_sol_equivalent = current_sol_equivalent_from_jito + additional_sol
 
-    st.metric("Aktueller Wert", fmt_usd(value_now))
-    st.caption(f"{jitosol_amount:.5f} JitoSOL × {current_jitosol_price:.2f} USD")
-    st.caption(f"≈ {sol_equivalent:.2f} SOL")
+    # Staking-Zuwachs: JitoSOL akkumuliert Staking über steigenden JitoSOL/SOL-Umtauschkurs.
+    staking_accrued_sol = max(0.0, jitosol_amount * (jitosol_sol_ratio_live - entry_jitosol_sol_ratio)) if jitosol_sol_ratio_live else 0.0
+    staking_accrued_usd = staking_accrued_sol * sol_usd_live
+    staking_accrued_eur = staking_accrued_sol * float(sol_eur_live) if sol_eur_live else None
+
+    st.metric("JitoSOL Preis", fmt_usd(current_jitosol_price_usd))
+    if current_jitosol_price_eur:
+        st.caption(f"≈ {current_jitosol_price_eur:.2f} € pro JitoSOL")
+
+    st.metric("JitoSOL/SOL Umtauschkurs", f"{jitosol_sol_ratio_live:.4f}" if jitosol_sol_ratio_live else "n/a")
+    if jitosol_sol_ratio_live:
+        st.caption(f"1 JitoSOL ≈ {jitosol_sol_ratio_live:.4f} SOL · Aufschlag {fmt_pct((jitosol_sol_ratio_live - 1) * 100)}")
+
+    st.metric("Aktueller Wert USD", fmt_usd(value_now_usd))
+    st.metric("Aktueller Wert EUR", "n/a" if value_now_eur is None else f"{value_now_eur:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+
+    st.caption(f"{jitosol_amount:.5f} JitoSOL ≈ {current_sol_equivalent_from_jito:.2f} SOL")
+    if additional_sol > 0:
+        st.caption(f"Zusätzlich: {additional_sol:.5f} SOL")
+    st.caption(f"Gesamt ≈ {total_sol_equivalent:.2f} SOL")
 
     st.metric(
-        "Buchgewinn/-verlust",
+        "Buchgewinn/-verlust USD",
         fmt_usd(pnl),
         delta=f"{pnl_pct:+.1f}%"
     )
+
+    st.divider()
+
+    st.write("**Staking über JitoSOL**")
+    st.metric("Geschätzter Staking-Zuwachs", f"{staking_accrued_sol:.4f} SOL")
+    st.caption(f"≈ {fmt_usd(staking_accrued_usd)}")
+    if staking_accrued_eur is not None:
+        st.caption(f"≈ {staking_accrued_eur:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+    st.caption("Schätzung aus JitoSOL/SOL-Live-Ratio minus deinem eingetragenen Einstiegs-Umtauschkurs.")
 
     st.divider()
 
@@ -681,10 +784,10 @@ with market:
     )
 
     if jitosol_usd_live and sol_usd_live:
-        jito_premium = (float(jitosol_usd_live) / float(sol_usd_live) - 1) * 100
-        m4.metric("JitoSOL Premium", fmt_pct(jito_premium))
+        jitosol_sol_ratio_live_market = float(jitosol_usd_live) / float(sol_usd_live)
+        m4.metric("JitoSOL/SOL", f"{jitosol_sol_ratio_live_market:.4f}", fmt_pct((jitosol_sol_ratio_live_market - 1) * 100))
     else:
-        m4.metric("JitoSOL Premium", "n/a")
+        m4.metric("JitoSOL/SOL", "n/a")
 
     st.divider()
 
@@ -709,32 +812,34 @@ with market:
         st.caption(f"Live-Daten zuletzt abgefragt: {fmt_datetime_utc(live_last_update)}")
 
     st.divider()
-    st.subheader("SOL/USD Kursgrafik")
+    st.subheader("SOL/USD Candlestick Chart")
 
-    chart_range = st.radio(
-        "Zeitraum",
-        ["1 Tag", "7 Tage", "30 Tage", "90 Tage"],
-        index=1,
-        horizontal=True,
-        key="sol_usd_chart_range",
+    chart_col1, chart_col2 = st.columns([0.5, 0.5])
+    with chart_col1:
+        selected_range = st.selectbox(
+            "Zeitraum",
+            list(COINBASE_RANGE_DAYS.keys()),
+            index=1,
+            help="1 Tag bis 1 Jahr. Die Daten kommen von Coinbase SOL-USD."
+        )
+    with chart_col2:
+        selected_interval = st.selectbox(
+            "Kerzenintervall",
+            list(COINBASE_CANDLE_GRANULARITIES.keys()),
+            index=3,
+            help="Für sehr lange Zeiträume mit 1-Minuten-Kerzen lädt die App viele Datenblöcke."
+        )
+
+    candles = fetch_coinbase_candles(
+        product_id="SOL-USD",
+        days=COINBASE_RANGE_DAYS[selected_range],
+        granularity=COINBASE_CANDLE_GRANULARITIES[selected_interval],
     )
-
-    try:
-        sol_chart_df = fetch_sol_usd_chart(chart_range)
-
-        if sol_chart_df.empty:
-            st.info("Für diesen Zeitraum konnten keine SOL/USD-Kursdaten geladen werden.")
-        else:
-            chart_display = sol_chart_df.set_index("time").rename(columns={"close": "SOL/USD"})
-            st.line_chart(chart_display, use_container_width=True)
-            st.caption("Quelle: Coinbase Exchange SOL-USD Candles. Darstellung: Schlusskurs je Kerze.")
-    except Exception as e:
-        st.warning(f"SOL/USD-Chart konnte nicht geladen werden: {e}")
+    render_candlestick_chart(candles, title=f"SOL/USD · {selected_range} · {selected_interval}")
 
     st.caption(
-        "SOL/BTC ist für deine These wichtig: Es zeigt, ob Solana relativ "
-        "zu Bitcoin Stärke aufbaut. Der SOL/USD- und JitoSOL-Kurs oben ist live; "
-        "die Fundamentaldaten darunter kommen aus dem täglichen GitHub-Workflow."
+        "Der Chart nutzt Coinbase SOL-USD Candles. JitoSOL wird separat über CoinGecko bewertet, "
+        "weil Coinbase keinen JitoSOL/SOL-Handelsmarkt bereitstellt."
     )
 
 
