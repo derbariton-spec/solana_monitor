@@ -15,7 +15,7 @@ from storage import load_history
 
 load_dotenv()
 
-st.set_page_config(page_title=APP_TITLE, page_icon="🦎", layout="wide")
+st.set_page_config(page_title=APP_TITLE, page_icon="◎", layout="wide")
 
 
 # ------------------------------------------------------------
@@ -66,6 +66,57 @@ def safe_float(value, fallback=0.0) -> float:
         return float(value)
     except Exception:
         return float(fallback)
+
+
+# ------------------------------------------------------------
+# Solana Logo / Header
+# ------------------------------------------------------------
+
+SOLANA_LOGO_SVG = """
+<svg width="54" height="54" viewBox="0 0 397 311" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Solana Logo">
+  <defs>
+    <linearGradient id="solanaGradientTop" x1="360" y1="30" x2="40" y2="285" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00FFA3"/>
+      <stop offset="0.52" stop-color="#DC1FFF"/>
+      <stop offset="1" stop-color="#9945FF"/>
+    </linearGradient>
+    <linearGradient id="solanaGradientMiddle" x1="360" y1="30" x2="40" y2="285" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00FFA3"/>
+      <stop offset="0.52" stop-color="#DC1FFF"/>
+      <stop offset="1" stop-color="#9945FF"/>
+    </linearGradient>
+    <linearGradient id="solanaGradientBottom" x1="360" y1="30" x2="40" y2="285" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00FFA3"/>
+      <stop offset="0.52" stop-color="#DC1FFF"/>
+      <stop offset="1" stop-color="#9945FF"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 0H383C395 0 401 15 392 24L333 83C329 87 324 89 318 89H0L64 0Z" fill="url(#solanaGradientTop)"/>
+  <path d="M333 111H14C2 111 -4 96 5 87L64 28C68 24 73 22 79 22H397L333 111Z" opacity="0.96" transform="translate(0 89)" fill="url(#solanaGradientMiddle)"/>
+  <path d="M64 222H383C395 222 401 237 392 246L333 305C329 309 324 311 318 311H0L64 222Z" fill="url(#solanaGradientBottom)"/>
+</svg>
+"""
+
+
+def render_header():
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:16px; margin-bottom:0.25rem;">
+            <div style="width:54px; height:54px; display:flex; align-items:center; justify-content:center;">
+                {SOLANA_LOGO_SVG}
+            </div>
+            <div>
+                <div style="font-size:2.35rem; font-weight:800; line-height:1.1; margin:0;">
+                    Solana Fundamental Monitor
+                </div>
+                <div style="font-size:0.95rem; opacity:0.75; margin-top:0.15rem;">
+                    Live-Markt, Fundamentaldaten, News und Investmentthese
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_data(ttl=30)
@@ -330,7 +381,7 @@ def fetch_news(max_items_per_feed: int = 4) -> list[dict]:
 
 df = load_history(days=365)
 
-st.title("🦎 Solana Fundamental Monitor")
+render_header()
 st.caption(
     "Persönliches Dashboard für die These: Solana als Finanzinfrastruktur "
     "für Stablecoins, RWA und institutionelle Nutzung."
