@@ -10,7 +10,7 @@ except Exception:  # pragma: no cover
     st = None
 
 APP_TITLE = "Solana Research Terminal"
-APP_VERSION = "4.0.0"
+APP_VERSION = "5.0.0"
 SOLANA_LOGO_URL = "https://cryptologos.cc/logos/solana-sol-logo.png"
 DEFAULT_CHAIN = "Solana"
 DEFAULT_PRODUCT_ID = "SOL-USD"
@@ -40,7 +40,7 @@ COINGLASS_OPEN_INTEREST_ENDPOINT = "/api/futures/openInterest/ohlc-history"
 COINGLASS_FUNDING_ENDPOINT = "/api/futures/fundingRate/oi-weight-ohlc-history"
 
 REQUEST_TIMEOUT = 25
-USER_AGENT = "solana-research-terminal/4.0"
+USER_AGENT = "solana-research-terminal/5.0"
 LOCAL_DATA_CSV = "data/solana_fundamentals.csv"
 
 CANDLE_INTERVALS = {

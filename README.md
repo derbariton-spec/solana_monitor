@@ -1,42 +1,77 @@
-# Solana Research Terminal v4.0
+# Solana Research Terminal 5.0
 
-Ein modulares Streamlit-Dashboard für Solana: Live-Markt, Candlestick-Chart, Portfolio/Login, Wallet-Auslesung, JitoSOL/Staking, Fundamentaldaten, Backfill, News und optionale CoinGlass Liquidation Levels.
+Ein persönliches Solana-Research-Dashboard mit Live-Markt, Fundamentaldaten, Score-Erklärung, Wallet/JitoSOL-Auswertung, Szenario-Rechner, Risiko-Ampel, Wochenbericht und optionalen CoinGlass Liquidation Levels.
 
-## Start lokal
+## Neu in Version 5.0
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python fetch_data.py
-streamlit run app.py
+- Datenqualitäts-Panel: zeigt, welche Kennzahlen belastbar, kurz historisiert oder fehlend sind.
+- Score-Erklärung: positive Treiber, Belastungsfaktoren und fehlende Daten werden direkt erklärt.
+- Subscores: Fundamentals, Onchain, Economics, Market Relative und Risk Buffer.
+- Besseres Scoring: Flows wie DEX/Fees/Revenue werden als 30D-Summe vs. vorherige 30D-Summe bewertet; Active Addresses werden geglättet.
+- Wallet/JitoSOL: öffentliche Solana-Wallet auslesen, SOL/JitoSOL/USDC anzeigen, Staking-Ertrag gegen Bought-SOL-Basis berechnen.
+- Szenario-Rechner: Portfolio-Wert bei frei wählbaren SOL-Zielpreisen, inklusive angenommener JitoSOL-APY.
+- Nachkauf-/Hedge-Ampel: einfache Risikoorientierung anhand Kurszone, Score und schwacher Kennzahlen.
+- These-gebrochen-Modul: Frühwarnsystem für strukturelle Schwächen.
+- Wochenbericht: 7-Tage-Veränderungen der wichtigsten Kennzahlen.
+- Optional: CoinGlass Liquidation Levels mit `COINGLASS_API_KEY`.
+
+## Repository-Struktur
+
+```text
+solana_monitor_v5/
+├── app.py
+├── auth.py
+├── backfill_history.py
+├── charts.py
+├── config.py
+├── data_sources.py
+├── fetch_data.py
+├── formatting.py
+├── news_fetcher.py
+├── portfolio.py
+├── quality.py
+├── reports.py
+├── risk.py
+├── scenario.py
+├── score.py
+├── scoring.py
+├── storage.py
+├── thesis.py
+├── wallet.py
+├── requirements.txt
+├── runtime.txt
+├── sql/
+│   └── supabase_setup.sql
+└── .github/
+    └── workflows/
+        ├── daily-fetch.yml
+        └── backfill-history.yml
 ```
 
-## Streamlit Secrets
+## Setup in Streamlit Cloud
+
+In Streamlit Secrets eintragen:
 
 ```toml
 SUPABASE_URL = "https://deinprojekt.supabase.co"
-SUPABASE_ANON_KEY = "sb_publishable_..."
+SUPABASE_ANON_KEY = "dein_publishable_key"
 COINGLASS_API_KEY = "optional"
 DEFILLAMA_API_KEY = "optional"
 SOLANA_RPC_URL = "optional"
 ```
 
-## Supabase
-
-Führe `sql/supabase_setup.sql` im Supabase SQL Editor aus.
+Supabase SQL Editor öffnen und den Inhalt von `sql/supabase_setup.sql` ausführen. Die Datei ist idempotent und kann mehrfach ausgeführt werden.
 
 ## GitHub Actions
 
-- `Daily Solana Monitor Update` läuft täglich und ruft `fetch_data.py` auf.
-- `Backfill Solana History` ist manuell startbar und ruft `backfill_history.py` auf.
+- `Daily Solana Monitor Update` sammelt täglich aktuelle Fundamentaldaten.
+- `Backfill Solana History` kann manuell gestartet werden und füllt die Historie.
 
-## Hinweis zu RWA und CoinGlass
+Nach dem Hochladen am besten zuerst `Backfill Solana History` unter GitHub → Actions starten.
 
-DefiLlama RWA Chain-Daten sind als API nach DefiLlama-Dokumentation im Pro-Bereich verfügbar. Ohne `DEFILLAMA_API_KEY` nutzt die App eine öffentliche RWA-Protokoll-Schätzung als Fallback.
+## Hinweise
 
-CoinGlass Liquidation Heatmap/Levels benötigen einen CoinGlass API-Key und einen API-Plan, der die Heatmap-Endpunkte freischaltet.
-
-## Sicherheit
-
-Die App liest niemals Private Keys oder Seed Phrases. Die Wallet-Auslesung nutzt ausschließlich die öffentliche Wallet-Adresse.
+- Für die Wallet-Auswertung wird nur die öffentliche Wallet-Adresse verwendet. Private Keys oder Seed Phrases werden niemals benötigt.
+- RWA und Active Addresses werden best-effort über öffentlich verfügbare Daten geladen. Wenn eine Quelle ihr Format ändert, zeigt das Datenqualitäts-Panel die Einschränkung an.
+- CoinGlass ist optional und benötigt einen API-Key. Ohne Key bleibt der Liquidationen-Tab als Hinweis-/Link-Bereich aktiv.
+- Die Risiko- und Nachkauf-Ampeln sind Entscheidungshilfen und keine Anlageberatung.

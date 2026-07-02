@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pandas as pd
 import streamlit as st
 
-from auth import current_user, is_logged_in, load_user_position, render_auth_box, save_user_position
+from auth import is_logged_in, load_user_position, render_auth_box, save_user_position
 from charts import render_candlestick_chart, render_line_history
 from config import (
     APP_TITLE,
@@ -28,21 +26,21 @@ from data_sources import (
 from formatting import fmt_datetime_utc, fmt_eur, fmt_number, fmt_pct, fmt_usd, is_missing, safe_float
 from news_fetcher import fetch_news
 from portfolio import PositionSettings, compute_portfolio
-from scoring import LABELS, WEIGHTS, compute_fundamental_score, interpretation_text, traffic_light
+from quality import build_data_quality_rows, quality_summary
+from reports import weekly_report_rows
+from risk import build_risk_rows
+from scenario import DEFAULT_TARGETS, build_price_scenarios
+from scoring import compute_fundamental_score, interpretation_text, traffic_light
 from storage import load_history
+from thesis import compute_subscores, score_explanation, thesis_break_rules
 from wallet import fetch_wallet_summary
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🟣", layout="wide")
 
 
-def render_header() -> None:
-    logo_col, text_col = st.columns([0.07, 0.93])
-    with logo_col:
-        st.image(SOLANA_LOGO_URL, width=56)
-    with text_col:
-        st.title("Solana Research Terminal")
-        st.caption("Version 4.0 · Live-Markt, Portfolio, Wallet, Fundamentals, News, Liquidation Levels und Investmentthese")
-
+# -----------------------------
+# Cached data access
+# -----------------------------
 
 @st.cache_data(ttl=30, show_spinner=False)
 def cached_live_market() -> dict:
@@ -52,39 +50,6 @@ def cached_live_market() -> dict:
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_current_fundamentals() -> dict:
     return fetch_snapshot()
-
-
-def merge_missing_current_metrics(latest: dict | None) -> dict | None:
-    """Use live current API data as fallback when the CSV row still has blanks.
-
-    The historical backfill cannot reliably populate every current UI metric
-    (especially RWA and active addresses). This keeps the visible dashboard
-    current while the daily CSV catches up.
-    """
-    if latest is None:
-        return None
-    enriched = dict(latest)
-    try:
-        current = cached_current_fundamentals()
-    except Exception:
-        return enriched
-    fallback_keys = [
-        "rwa_usd",
-        "active_addresses",
-        "transactions_24h",
-        "chain_fees_usd",
-        "chain_revenue_usd",
-        "app_fees_usd",
-        "app_revenue_usd",
-        "dex_volume_usd",
-        "stablecoins_usd",
-        "tvl_usd",
-        "tvl_sol",
-    ]
-    for key in fallback_keys:
-        if is_missing(enriched.get(key)) and not is_missing(current.get(key)):
-            enriched[key] = current.get(key)
-    return enriched
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -107,18 +72,9 @@ def cached_coinglass(symbol: str, pair: str, exchange: str, model: str) -> dict:
     return fetch_coinglass_heatmap(symbol=symbol, pair=pair, exchange=exchange, model=model)
 
 
-def pct_delta(latest, prev, key: str) -> float | None:
-    if prev is None:
-        return None
-    try:
-        cur = latest.get(key)
-        old = prev.get(key)
-        if pd.isna(cur) or pd.isna(old) or float(old) == 0:
-            return None
-        return (float(cur) - float(old)) / float(old) * 100
-    except Exception:
-        return None
-
+# -----------------------------
+# Data helpers
+# -----------------------------
 
 def row_to_dict(row) -> dict | None:
     if row is None:
@@ -134,12 +90,57 @@ def row_to_dict(row) -> dict | None:
     return out
 
 
+def pct_delta(latest: dict | pd.Series | None, prev: dict | pd.Series | None, key: str) -> float | None:
+    if latest is None or prev is None:
+        return None
+    try:
+        cur = latest.get(key)
+        old = prev.get(key)
+        if pd.isna(cur) or pd.isna(old) or float(old) == 0:
+            return None
+        return (float(cur) - float(old)) / float(old) * 100
+    except Exception:
+        return None
+
+
+def merge_missing_current_metrics(latest: dict | None) -> dict | None:
+    """Use live current API data as fallback when the CSV row still has blanks."""
+    if latest is None:
+        return None
+    enriched = dict(latest)
+    try:
+        current = cached_current_fundamentals()
+    except Exception:
+        return enriched
+    fallback_keys = [
+        "rwa_usd",
+        "active_addresses",
+        "transactions_24h",
+        "chain_fees_usd",
+        "chain_revenue_usd",
+        "app_fees_usd",
+        "app_revenue_usd",
+        "dex_volume_usd",
+        "stablecoins_usd",
+        "tvl_usd",
+        "tvl_sol",
+        "sol_usd",
+        "sol_btc",
+        "btc_usd",
+        "btc_dominance",
+    ]
+    for key in fallback_keys:
+        if is_missing(enriched.get(key)) and not is_missing(current.get(key)):
+            enriched[key] = current.get(key)
+    return enriched
+
+
 def get_latest_context():
     df = load_history(days=3650)
     if df.empty:
         return df, None, None, None, compute_fundamental_score({}, None, None)
-    df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
-    df = df.sort_values("snapshot_date")
+    df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
+    df = df.dropna(subset=["snapshot_date"]).sort_values("snapshot_date")
     latest_row = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else None
     target = latest_row["snapshot_date"] - pd.Timedelta(days=30)
@@ -150,19 +151,38 @@ def get_latest_context():
     return df, latest, prev, past, result
 
 
-def render_top_metrics(latest, prev, live: dict, result: dict) -> None:
+def get_portfolio_snapshot(live: dict):
+    position = load_user_position() if is_logged_in() else PositionSettings()
+    wallet_summary = cached_wallet(position.wallet_address) if position.wallet_address else {"ok": False, "error": "Keine Wallet hinterlegt."}
+    portfolio = compute_portfolio(position, wallet_summary, live)
+    return position, wallet_summary, portfolio
+
+
+# -----------------------------
+# Header and top metrics
+# -----------------------------
+
+def render_header() -> None:
+    logo_col, text_col = st.columns([0.07, 0.93])
+    with logo_col:
+        st.image(SOLANA_LOGO_URL, width=56)
+    with text_col:
+        st.title("Solana Research Terminal")
+        st.caption(f"Version {APP_VERSION} · Score-Erklärung, Datenqualität, Subscores, Wallet/JitoSOL, Szenarien, Risiko und Liquidation Levels")
+
+
+def render_top_metrics(latest, live: dict, result: dict) -> None:
     score = safe_float(result.get("score"), 50)
     status = result.get("status", "neutral")
     icon = "🟢" if status == "intakt" else "🔴" if status == "geschwaecht" else "🟡"
     sol_usd = safe_float(live.get("sol_usd"), safe_float(latest.get("sol_usd") if latest is not None else None))
     sol_eur = live.get("sol_eur")
     sol_24h = live.get("sol_24h_change")
-    btc_dom = latest.get("btc_dominance") if latest is not None else None
     sol_btc = safe_float(live.get("sol_btc"), safe_float(latest.get("sol_btc") if latest is not None else None))
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Thesis Status", f"{icon} {str(status).capitalize()}")
-    c2.metric("Fundamental Score", f"{score:.0f}/100")
+    c2.metric("Gesamt Score", f"{score:.0f}/100")
     c3.metric("SOL/USD Live", f"{sol_usd:.2f} $", None if sol_24h is None else fmt_pct(sol_24h) + " 24h")
     c4.metric("SOL/EUR Live", "n/a" if sol_eur is None else f"{float(sol_eur):.2f} €")
     c5.metric("SOL/BTC", f"{sol_btc:.6f}")
@@ -171,7 +191,69 @@ def render_top_metrics(latest, prev, live: dict, result: dict) -> None:
     st.caption(f"Live-Kurs zuletzt abgefragt: {fmt_datetime_utc(live.get('timestamp'))}")
 
 
-def render_portfolio_panel(live: dict) -> None:
+# -----------------------------
+# Individual tabs
+# -----------------------------
+
+def render_overview_tab(df, latest, result, live, wallet_summary) -> None:
+    st.subheader("Tageskommentar")
+    st.write(interpretation_text(result))
+
+    st.subheader("Subscores")
+    sub = pd.DataFrame(compute_subscores(result))
+    st.dataframe(sub, hide_index=True, use_container_width=True)
+
+    explanation = score_explanation(result)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**Positive Treiber**")
+        if explanation["positive"]:
+            for line in explanation["positive"]:
+                st.success(line)
+        else:
+            st.info("Noch keine klaren positiven Treiber.")
+    with col2:
+        st.markdown("**Belastungsfaktoren**")
+        if explanation["negative"]:
+            for line in explanation["negative"]:
+                st.warning(line)
+        else:
+            st.success("Keine starken negativen Treiber im Score.")
+    with col3:
+        st.markdown("**Datenabdeckung**")
+        quality_rows = build_data_quality_rows(latest, df, live, wallet_summary)
+        st.write(quality_summary(quality_rows))
+        if latest is not None:
+            st.caption(f"Letzter Fundamentaldaten-Snapshot: {latest.get('snapshot_date')}")
+
+    st.subheader("These gebrochen?")
+    st.dataframe(pd.DataFrame(thesis_break_rules(latest, df, result)), hide_index=True, use_container_width=True)
+
+
+def render_market_tab(live: dict) -> None:
+    st.subheader("SOL/USD Candlestick")
+    r_col, i_col = st.columns(2)
+    with r_col:
+        range_label = st.selectbox("Zeitraum", list(CANDLE_RANGES.keys()), index=1)
+    with i_col:
+        interval_label = st.selectbox("Kerzenintervall", list(CANDLE_INTERVALS.keys()), index=3)
+    days = CANDLE_RANGES[range_label]
+    granularity = CANDLE_INTERVALS[interval_label]
+    candles = cached_candles(days, granularity)
+    render_candlestick_chart(candles, f"SOL/USD · Coinbase · {range_label} · {interval_label}")
+    st.caption("Coinbase begrenzt Kerzenabfragen. Bei kleinen Intervallen kann der dargestellte Zeitraum automatisch gekürzt werden.")
+
+    st.divider()
+    st.subheader("Live-Markt")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("SOL/USD", fmt_usd(live.get("sol_usd")), None if live.get("sol_24h_change") is None else fmt_pct(live.get("sol_24h_change")) + " 24h")
+    m2.metric("SOL/EUR", fmt_eur(live.get("sol_eur")))
+    m3.metric("JitoSOL/USD", fmt_usd(live.get("jitosol_usd")), None if live.get("jitosol_24h_change") is None else fmt_pct(live.get("jitosol_24h_change")) + " 24h")
+    ratio = safe_float(live.get("jitosol_usd"), 0) / safe_float(live.get("sol_usd"), 1) if live.get("jitosol_usd") and live.get("sol_usd") else None
+    m4.metric("JitoSOL/SOL", "n/a" if ratio is None else fmt_number(ratio, 6))
+
+
+def render_portfolio_tab(live: dict) -> None:
     st.subheader("Login & Portfolio")
     render_auth_box()
     st.divider()
@@ -191,17 +273,17 @@ def render_portfolio_panel(live: dict) -> None:
             hist_sol_entry = st.number_input("Historischer SOL-Einstieg USD", min_value=0.0, value=float(base_position.historical_sol_entry_usd), step=0.01, format="%.2f")
             staking_start = st.text_input("Staking-Startdatum YYYY-MM-DD (optional)", value=base_position.staking_start_date)
         submitted = st.form_submit_button("Position speichern")
-        new_position = PositionSettings(wallet_address=wallet_address.strip(), manual_jitosol_amount=manual_jito, manual_sol_equivalent=manual_sol_equiv, avg_entry_jitosol_usd=avg_entry, historical_sol_entry_usd=hist_sol_entry, bought_sol_basis=bought_basis, staking_start_date=staking_start.strip())
+        position = PositionSettings(wallet_address=wallet_address.strip(), manual_jitosol_amount=manual_jito, manual_sol_equivalent=manual_sol_equiv, avg_entry_jitosol_usd=avg_entry, historical_sol_entry_usd=hist_sol_entry, bought_sol_basis=bought_basis, staking_start_date=staking_start.strip())
         if submitted:
             if is_logged_in():
-                if save_user_position(new_position):
+                if save_user_position(position):
                     st.success("Position gespeichert.")
                     st.cache_data.clear()
             else:
                 st.warning("Bitte anmelden, um die Position dauerhaft zu speichern.")
 
-    wallet_summary = cached_wallet(new_position.wallet_address) if new_position.wallet_address else {"ok": False}
-    portfolio = compute_portfolio(new_position, wallet_summary, live)
+    wallet_summary = cached_wallet(position.wallet_address) if position.wallet_address else {"ok": False}
+    portfolio = compute_portfolio(position, wallet_summary, live)
 
     st.subheader("Portfolio-Auswertung")
     p1, p2, p3, p4 = st.columns(4)
@@ -216,36 +298,22 @@ def render_portfolio_panel(live: dict) -> None:
     q3.metric("Staking-Ertrag SOL", "n/a" if portfolio["staking_rewards_sol"] is None else fmt_number(portfolio["staking_rewards_sol"], 5))
     q4.metric("Staking-Ertrag EUR", fmt_eur(portfolio["staking_rewards_eur"]))
 
+    st.subheader("Performance-Zerlegung")
+    breakdown = [
+        {"Baustein": "JitoSOL Wert", "USD": fmt_usd(portfolio["jitosol_value_usd"]), "EUR": fmt_eur(portfolio["jitosol_value_eur"])},
+        {"Baustein": "Unstaked SOL", "USD": fmt_usd(portfolio["sol_value_usd"]), "EUR": fmt_eur(portfolio["sol_value_eur"])},
+        {"Baustein": "USDC", "USD": fmt_usd(portfolio["usdc_balance"]), "EUR": "n/a"},
+        {"Baustein": "JitoSOL Rewards", "USD": fmt_usd(portfolio["staking_rewards_usd"]), "EUR": fmt_eur(portfolio["staking_rewards_eur"])},
+    ]
+    st.dataframe(pd.DataFrame(breakdown), hide_index=True, use_container_width=True)
+
     if wallet_summary.get("ok"):
         st.caption("Wallet wurde on-chain ausgelesen. Es wurde kein Private Key verwendet.")
         st.write({"SOL": portfolio["sol_balance"], "JitoSOL": portfolio["jitosol_amount"], "USDC": portfolio["usdc_balance"]})
-    elif new_position.wallet_address:
+    elif position.wallet_address:
         st.warning(wallet_summary.get("error", "Wallet konnte nicht gelesen werden."))
     if portfolio.get("staking_apy") is not None:
         st.metric("Geschätzte annualisierte JitoSOL-Rendite", fmt_pct(portfolio["staking_apy"]))
-
-
-def render_market_tab(live: dict) -> None:
-    st.subheader("SOL/USD Candlestick")
-    r_col, i_col = st.columns(2)
-    with r_col:
-        range_label = st.selectbox("Zeitraum", list(CANDLE_RANGES.keys()), index=1)
-    with i_col:
-        interval_label = st.selectbox("Kerzenintervall", list(CANDLE_INTERVALS.keys()), index=3)
-    days = CANDLE_RANGES[range_label]
-    granularity = CANDLE_INTERVALS[interval_label]
-    candles = cached_candles(days, granularity)
-    render_candlestick_chart(candles, f"SOL/USD · Coinbase · {range_label} · {interval_label}")
-    st.caption("Coinbase begrenzt Kerzenabfragen. Bei kleinen Intervallen kann der dargestellte Zeitraum daher automatisch gekürzt werden.")
-
-    st.divider()
-    st.subheader("Live-Markt")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("SOL/USD", fmt_usd(live.get("sol_usd")), None if live.get("sol_24h_change") is None else fmt_pct(live.get("sol_24h_change")) + " 24h")
-    m2.metric("SOL/EUR", fmt_eur(live.get("sol_eur")))
-    m3.metric("JitoSOL/USD", fmt_usd(live.get("jitosol_usd")), None if live.get("jitosol_24h_change") is None else fmt_pct(live.get("jitosol_24h_change")) + " 24h")
-    ratio = safe_float(live.get("jitosol_usd"), 0) / safe_float(live.get("sol_usd"), 1) if live.get("jitosol_usd") and live.get("sol_usd") else None
-    m4.metric("JitoSOL/SOL", "n/a" if ratio is None else fmt_number(ratio, 6))
 
 
 def render_fundamentals_tab(df, latest, prev, result) -> None:
@@ -265,7 +333,9 @@ def render_fundamentals_tab(df, latest, prev, result) -> None:
         ("Active Addresses", "active_addresses", lambda v: fmt_number(v, 0)),
     ]
     for idx, (label, key, formatter) in enumerate(metrics):
-        cols[idx % 4].metric(label, formatter(latest.get(key)), None if prev is None else (None if pct_delta(latest, prev, key) is None else fmt_pct(pct_delta(latest, prev, key))))
+        delta = pct_delta(latest, prev, key)
+        cols[idx % 4].metric(label, formatter(latest.get(key)), None if delta is None else fmt_pct(delta))
+
     st.subheader("30-Tage-Ampel")
     st.caption("Bestandswerte werden gegen den Stand vor ca. 30 Tagen verglichen. DEX/Fees/Revenue werden als 30D-Rolling-Summe gegen die vorherigen 30 Tage bewertet. Active Addresses werden geglättet.")
     rows = []
@@ -281,6 +351,79 @@ def render_fundamentals_tab(df, latest, prev, result) -> None:
             "Gewicht": fmt_pct(item.get("weight", 0) * 100, 0),
             "Bewertung": item.get("note", ""),
         })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def render_quality_tab(df, latest, live, wallet_summary) -> None:
+    st.subheader("Datenqualität")
+    rows = build_data_quality_rows(latest, df, live, wallet_summary)
+    st.info(quality_summary(rows))
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def render_thesis_tab(df, latest, result) -> None:
+    st.subheader("Warum dieser Score?")
+    explanation = score_explanation(result, top_n=8)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### Positive Treiber")
+        for line in explanation["positive"] or ["Keine klaren positiven Treiber."]:
+            st.success(line)
+    with col2:
+        st.markdown("### Belastungsfaktoren")
+        for line in explanation["negative"] or ["Keine starken negativen Treiber."]:
+            st.warning(line)
+
+    st.markdown("### Subscores")
+    st.dataframe(pd.DataFrame(compute_subscores(result)), hide_index=True, use_container_width=True)
+
+    st.markdown("### These gebrochen?")
+    st.caption("Das ist kein automatisches Verkaufssignal, sondern ein Frühwarnsystem für strukturelle Schwächen.")
+    st.dataframe(pd.DataFrame(thesis_break_rules(latest, df, result)), hide_index=True, use_container_width=True)
+
+
+def render_scenario_tab(live: dict, portfolio: dict) -> None:
+    st.subheader("Szenario-Rechner")
+    st.caption("Berechnet deine SOL/JitoSOL-Exposure in Zielpreis-Szenarien. Es ist eine Modellrechnung, keine Prognose.")
+    default_targets = ", ".join(str(x) for x in DEFAULT_TARGETS)
+    raw = st.text_input("SOL-Zielpreise USD, kommagetrennt", value=default_targets)
+    apy = st.number_input("JitoSOL APY Annahme", min_value=0.0, max_value=20.0, value=6.5, step=0.1)
+    try:
+        targets = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    except Exception:
+        targets = DEFAULT_TARGETS
+        st.warning("Zielpreise konnten nicht gelesen werden. Verwende Standardwerte.")
+    rows = build_price_scenarios(portfolio, live, targets, apy)
+    display = []
+    for r in rows:
+        display.append({
+            "SOL Ziel": fmt_usd(r["SOL Ziel USD"]),
+            "Portfolio USD": fmt_usd(r["Portfolio USD"]),
+            "Portfolio EUR": fmt_eur(r["Portfolio EUR"]),
+            "Rewards/Jahr SOL": fmt_number(r["JitoSOL Rewards/Jahr SOL"], 3),
+            "Rewards/Jahr USD": fmt_usd(r["Rewards/Jahr USD"]),
+            "Abstand zu heute": fmt_pct(r["Abstand zu heute"]) if r["Abstand zu heute"] is not None else "n/a",
+        })
+    st.dataframe(pd.DataFrame(display), hide_index=True, use_container_width=True)
+
+
+def render_risk_tab(result: dict, live: dict) -> None:
+    st.subheader("Nachkauf- und Hedge-Ampel")
+    col1, col2 = st.columns(2)
+    with col1:
+        low = st.number_input("Akkumulation unter USD", min_value=1.0, value=150.0, step=5.0)
+    with col2:
+        high = st.number_input("Vorsicht über USD", min_value=1.0, value=220.0, step=5.0)
+    st.dataframe(pd.DataFrame(build_risk_rows(result, live, low, high)), hide_index=True, use_container_width=True)
+    st.caption("Die Ampel kombiniert Kurszone, Score, kurzfristige Marktbewegung und schwache Kennzahlen. Sie ersetzt keine eigene Entscheidung.")
+
+
+def render_weekly_tab(df, result) -> None:
+    st.subheader("Solana Wochenbericht")
+    if df.empty:
+        st.info("Noch keine Historie vorhanden.")
+        return
+    rows = weekly_report_rows(df, result)
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
@@ -323,40 +466,75 @@ def render_history_tab(df) -> None:
     if df.empty:
         st.info("Noch keine historischen Daten vorhanden.")
         return
-    options = {"fundamental_score": "Fundamental Score", "sol_usd": "SOL/USD", "sol_btc": "SOL/BTC", "tvl_usd": "TVL USD", "tvl_sol": "TVL in SOL", "stablecoins_usd": "Stablecoins", "rwa_usd": "RWA", "dex_volume_usd": "DEX Volumen", "app_fees_usd": "App Fees"}
+    options = {
+        "fundamental_score": "Fundamental Score",
+        "sol_usd": "SOL/USD",
+        "sol_btc": "SOL/BTC",
+        "tvl_usd": "TVL USD",
+        "tvl_sol": "TVL in SOL",
+        "stablecoins_usd": "Stablecoins",
+        "rwa_usd": "RWA",
+        "dex_volume_usd": "DEX Volumen",
+        "app_fees_usd": "App Fees",
+        "active_addresses": "Active Addresses",
+    }
     available = [k for k in options if k in df.columns]
     choice = st.selectbox("Kennzahl", available, format_func=lambda k: options[k])
     render_line_history(df, choice, options[choice])
 
 
+# -----------------------------
+# Main
+# -----------------------------
+
 def main() -> None:
     render_header()
     df, latest, prev, past, result = get_latest_context()
     live = cached_live_market()
-    render_top_metrics(latest, prev, live, result)
+    position, wallet_summary, portfolio = get_portfolio_snapshot(live)
+    render_top_metrics(latest, live, result)
 
-    overview, market, portfolio, fundamentals, liquidations, news, history, raw = st.tabs([
-        "Übersicht", "Markt", "Portfolio", "Fundamentals", "Liquidationen", "News", "Historie", "Rohdaten"
+    tabs = st.tabs([
+        "Übersicht",
+        "Markt",
+        "Portfolio",
+        "Fundamentals",
+        "Datenqualität",
+        "These",
+        "Szenarien",
+        "Risiko",
+        "Wochenbericht",
+        "Liquidationen",
+        "News",
+        "Historie",
+        "Rohdaten",
     ])
-    with overview:
-        st.subheader("Tageskommentar")
-        st.write(interpretation_text(result))
-        if latest is not None:
-            st.write("Letzter Fundamentaldaten-Snapshot:", str(latest.get("snapshot_date")))
-        st.write("Nächste Schritte: CoinGlass API-Key hinterlegen, Wallet speichern, Backfill starten.")
-    with market:
+
+    with tabs[0]:
+        render_overview_tab(df, latest, result, live, wallet_summary)
+    with tabs[1]:
         render_market_tab(live)
-    with portfolio:
-        render_portfolio_panel(live)
-    with fundamentals:
+    with tabs[2]:
+        render_portfolio_tab(live)
+    with tabs[3]:
         render_fundamentals_tab(df, latest, prev, result)
-    with liquidations:
+    with tabs[4]:
+        render_quality_tab(df, latest, live, wallet_summary)
+    with tabs[5]:
+        render_thesis_tab(df, latest, result)
+    with tabs[6]:
+        render_scenario_tab(live, portfolio)
+    with tabs[7]:
+        render_risk_tab(result, live)
+    with tabs[8]:
+        render_weekly_tab(df, result)
+    with tabs[9]:
         render_coinglass_tab(live)
-    with news:
+    with tabs[10]:
         render_news_tab()
-    with history:
+    with tabs[11]:
         render_history_tab(df)
-    with raw:
+    with tabs[12]:
         st.subheader("Rohdaten")
         st.dataframe(df.sort_values("snapshot_date", ascending=False) if not df.empty else df, use_container_width=True)
 

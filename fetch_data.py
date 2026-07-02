@@ -41,7 +41,7 @@ def main() -> None:
         candidates = df[df["snapshot_date"] <= target]
         if not candidates.empty:
             past = row_as_dict(candidates.iloc[-1])
-    result = compute_fundamental_score(current, past)
+    result = compute_fundamental_score(current, past, df)
     row = {"snapshot_date": today.isoformat(), **current, "fundamental_score": result["score"], "thesis_status": result["status"], "note": interpretation_text(result)}
     upsert_row(row)
     print(f"[{today}] Gespeichert. Score: {result['score']}/100 ({result['status']})")
