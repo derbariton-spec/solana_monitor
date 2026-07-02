@@ -18,26 +18,31 @@ LABELS = {
     "sol_btc": "SOL/BTC",
 }
 
+# V4.1 scoring: structural Solana thesis, not short-term trading signal.
+# Missing optional metrics are excluded. Available metrics are scored by a mix of
+# absolute strength and 30-day trend.
 WEIGHTS = {
-    "stablecoins_usd": 0.18,
-    "rwa_usd": 0.18,
-    "tvl_sol": 0.13,
-    "tvl_usd": 0.10,
-    "dex_volume_usd": 0.10,
-    "app_fees_usd": 0.09,
-    "chain_fees_usd": 0.08,
+    "stablecoins_usd": 0.17,
+    "rwa_usd": 0.14,
+    "tvl_usd": 0.13,
+    "tvl_sol": 0.10,
+    "dex_volume_usd": 0.11,
+    "app_fees_usd": 0.10,
+    "app_revenue_usd": 0.07,
+    "chain_fees_usd": 0.07,
     "active_addresses": 0.07,
-    "sol_btc": 0.07,
+    "sol_btc": 0.04,
 }
 
 ABSOLUTE_THRESHOLDS = {
-    "stablecoins_usd": (5_000_000_000, 10_000_000_000),
+    "stablecoins_usd": (5_000_000_000, 12_000_000_000),
     "rwa_usd": (500_000_000, 1_500_000_000),
-    "tvl_usd": (2_000_000_000, 4_000_000_000),
-    "dex_volume_usd": (500_000_000, 1_500_000_000),
-    "app_fees_usd": (1_000_000, 4_000_000),
+    "tvl_usd": (2_000_000_000, 5_000_000_000),
+    "dex_volume_usd": (500_000_000, 2_000_000_000),
+    "app_fees_usd": (1_000_000, 5_000_000),
+    "app_revenue_usd": (250_000, 2_000_000),
     "chain_fees_usd": (150_000, 500_000),
-    "active_addresses": (500_000, 2_000_000),
+    "active_addresses": (500_000, 2_500_000),
 }
 
 
@@ -60,27 +65,61 @@ def absolute_score(key: str, value: Any) -> float | None:
     low, high = ABSOLUTE_THRESHOLDS[key]
     value = safe_float(value)
     if value <= low:
-        return 35
+        return 40
     if value >= high:
-        return 80
-    return 35 + (value - low) / (high - low) * 45
+        return 86
+    return 40 + (value - low) / (high - low) * 46
 
 
-def metric_score(key: str, current: dict[str, Any], past: dict[str, Any] | None) -> tuple[float, float | None, str]:
+def growth_score(g: float | None) -> float | None:
+    if g is None:
+        return None
+    if g >= 20:
+        return 92
+    if g >= 8:
+        return 82
+    if g >= 0:
+        return 68
+    if g >= -5:
+        return 56
+    if g >= -15:
+        return 42
+    return 25
+
+
+def growth_note(g: float | None) -> str:
+    if g is None:
+        return "absolut bewertet"
+    if g >= 20:
+        return "stark verbessert"
+    if g >= 8:
+        return "verbessert"
+    if g >= 0:
+        return "leicht verbessert"
+    if g >= -5:
+        return "stabil bis leicht schwächer"
+    if g >= -15:
+        return "schwächer"
+    return "deutlich schwächer"
+
+
+def metric_score(key: str, current: dict[str, Any], past: dict[str, Any] | None) -> tuple[float | None, float | None, str]:
+    value = current.get(key)
+    if value is None:
+        return None, None, "nicht verfügbar"
+
     g = growth_pct(current, past, key)
-    if g is not None:
-        if g >= 20:
-            return 90, g, "stark verbessert"
-        if g >= 8:
-            return 78, g, "verbessert"
-        if g >= -5:
-            return 58, g, "stabil"
-        if g >= -15:
-            return 42, g, "schwächer"
-        return 25, g, "deutlich schwächer"
-    abs_score = absolute_score(key, current.get(key))
-    if abs_score is not None:
-        return abs_score, None, "absolut bewertet"
+    g_score = growth_score(g)
+    a_score = absolute_score(key, value)
+
+    if g_score is not None and a_score is not None:
+        # Long-term fundamental thesis: absolute adoption matters slightly more than 30d momentum.
+        score = 0.60 * a_score + 0.40 * g_score
+        return score, g, f"{growth_note(g)} · strukturell bewertet"
+    if a_score is not None:
+        return a_score, g, "absolut bewertet"
+    if g_score is not None:
+        return g_score, g, growth_note(g)
     return 50, None, "neutral"
 
 
@@ -88,21 +127,30 @@ def compute_fundamental_score(current: dict[str, Any], past: dict[str, Any] | No
     rows = []
     weighted = 0.0
     used = 0.0
+    missing = []
     for key, weight in WEIGHTS.items():
         score, g, note = metric_score(key, current, past)
-        if current.get(key) is None and g is None:
+        if score is None:
+            missing.append(key)
             continue
         rows.append({"key": key, "label": LABELS.get(key, key), "score": score, "growth_pct": g, "note": note, "weight": weight})
         weighted += score * weight
         used += weight
     final = weighted / used if used else 50.0
-    if final >= 70:
+    if final >= 65:
         status = "intakt"
-    elif final < 40:
+    elif final < 45:
         status = "geschwaecht"
     else:
         status = "neutral"
-    return {"score": round(final, 2), "status": status, "details": rows, "growth_pct": {r["key"]: r["growth_pct"] for r in rows}}
+    return {
+        "score": round(final, 2),
+        "status": status,
+        "details": rows,
+        "missing": missing,
+        "coverage": round(used / sum(WEIGHTS.values()) * 100, 1) if WEIGHTS else 0,
+        "growth_pct": {r["key"]: r["growth_pct"] for r in rows},
+    }
 
 
 def traffic_light(value: float | None) -> str:
@@ -118,8 +166,10 @@ def traffic_light(value: float | None) -> str:
 def interpretation_text(result: dict[str, Any]) -> str:
     score = safe_float(result.get("score"), 50)
     status = result.get("status", "neutral")
+    coverage = result.get("coverage")
+    suffix = f" Datenabdeckung: {coverage:.0f}%." if isinstance(coverage, (int, float)) else ""
     if status == "intakt":
-        return f"Score {score:.0f}/100: Die Solana-These wirkt auf Basis der verfügbaren Fundamentaldaten intakt."
+        return f"Score {score:.0f}/100: Die Solana-These wirkt auf Basis der verfügbaren Fundamentaldaten intakt.{suffix}"
     if status == "geschwaecht":
-        return f"Score {score:.0f}/100: Die Solana-These wirkt geschwächt. Prüfe die roten Kennzahlen im Detail."
-    return f"Score {score:.0f}/100: Die Datenlage ist gemischt oder noch unvollständig."
+        return f"Score {score:.0f}/100: Die Solana-These wirkt geschwächt. Prüfe die roten Kennzahlen im Detail.{suffix}"
+    return f"Score {score:.0f}/100: Die Datenlage ist gemischt oder noch unvollständig.{suffix}"

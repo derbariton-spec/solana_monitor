@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import time
+from html import unescape
 from typing import Any
 
 import pandas as pd
@@ -34,6 +36,8 @@ from config import (
 from formatting import safe_float
 
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+HTML_HEADERS = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+DEFILLAMA_SOLANA_PAGE_URL = "https://defillama.com/chain/solana"
 
 
 def get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None, retries: int = 2) -> Any | None:
@@ -194,10 +198,64 @@ def fetch_historical_fees(data_type: str) -> dict[str, float]:
     return _history_from_llama_overview(DEFILLAMA_FEES_URL, data_type)
 
 
+def _parse_compact_number(value: str | None) -> float | None:
+    """Parse strings like '$1.991b', '2.85m', '587,533' into floats."""
+    if not value:
+        return None
+    raw = unescape(str(value)).strip().lower()
+    raw = raw.replace("$", "").replace("€", "").replace(",", "").replace(" ", "")
+    match = re.search(r"(-?\d+(?:\.\d+)?)([kmbt])?", raw)
+    if not match:
+        return None
+    number = float(match.group(1))
+    suffix = match.group(2)
+    factor = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000, "t": 1_000_000_000_000}.get(suffix, 1)
+    return number * factor
+
+
+def fetch_defillama_solana_page_metrics() -> dict[str, float | None]:
+    """Best-effort parser for current Solana key metrics displayed on DefiLlama.
+
+    The public JSON APIs do not consistently expose every chain-level UI metric.
+    This parser is deliberately optional: if the page format changes, it returns
+    None values and the rest of the app keeps working.
+    """
+    try:
+        response = requests.get(DEFILLAMA_SOLANA_PAGE_URL, headers=HTML_HEADERS, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        text = response.text
+    except Exception:
+        return {}
+
+    # Turn the rendered/serialized HTML into searchable text while keeping labels close to numbers.
+    text = re.sub(r"<[^>]+>", "", text)
+    text = unescape(text)
+    text = re.sub(r"\s+", " ", text)
+
+    patterns = {
+        "rwa_usd": r"RWA\s+Active\s+Mcap\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
+        "chain_fees_usd": r"Chain\s+Fees\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
+        "chain_revenue_usd": r"Chain\s+Revenue\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
+        "active_addresses": r"Active\s+Addresses\s*\(24h\)\s*([0-9.,]+\s*[kmbtKMBT]?)",
+        "transactions_24h": r"Transactions\s*\(24h\)\s*([0-9.,]+\s*[kmbtKMBT]?)",
+        "app_revenue_usd": r"App\s+Revenue\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
+        "app_fees_usd": r"App\s+Fees\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
+    }
+    out: dict[str, float | None] = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        out[key] = _parse_compact_number(match.group(1)) if match else None
+    return out
+
+
 def fetch_current_chain_metrics_scrape_fallback() -> dict[str, Any]:
-    # DefiLlama chain page exposes these in the UI. The public API does not consistently expose
-    # all chain-level metrics, so V4 keeps them optional unless a reliable endpoint is available.
-    return {"chain_fees_usd": None, "chain_revenue_usd": None, "active_addresses": None, "transactions_24h": None}
+    metrics = fetch_defillama_solana_page_metrics()
+    return {
+        "chain_fees_usd": metrics.get("chain_fees_usd"),
+        "chain_revenue_usd": metrics.get("chain_revenue_usd"),
+        "active_addresses": metrics.get("active_addresses"),
+        "transactions_24h": metrics.get("transactions_24h"),
+    }
 
 
 def fetch_rwa_active_mcap_usd() -> float | None:
@@ -218,8 +276,13 @@ def fetch_rwa_active_mcap_usd() -> float | None:
                             return float(d[key])
         except Exception:
             pass
-    # Public fallback: sum protocol chain TVL for protocols marked RWA on Solana. This is NOT the
-    # same as DeFiLlama RWA Active Mcap, but avoids a blank if Pro API is not available.
+    # Public current-page fallback: DefiLlama displays RWA Active Mcap on the Solana chain page.
+    page_metrics = fetch_defillama_solana_page_metrics()
+    if page_metrics.get("rwa_usd") is not None:
+        return page_metrics.get("rwa_usd")
+
+    # Last-resort fallback: sum protocol chain TVL for protocols marked RWA on Solana. This is NOT the
+    # same as DeFiLlama RWA Active Mcap, but avoids a blank if the page/API is unavailable.
     protocols = get_json(DEFILLAMA_PROTOCOLS_URL) or []
     total = 0.0
     found = False
@@ -374,8 +437,15 @@ def fetch_snapshot() -> dict[str, Any]:
     dex_volume_usd = fetch_current_dex_volume_usd()
     app_fees_usd = fetch_current_app_fees_usd()
     app_revenue_usd = fetch_current_app_revenue_usd()
+    page_metrics = fetch_defillama_solana_page_metrics()
+    if app_fees_usd is None:
+        app_fees_usd = page_metrics.get("app_fees_usd")
+    if app_revenue_usd is None:
+        app_revenue_usd = page_metrics.get("app_revenue_usd")
     chain = fetch_current_chain_metrics_scrape_fallback()
     rwa_usd = fetch_rwa_active_mcap_usd()
+    if rwa_usd is None:
+        rwa_usd = page_metrics.get("rwa_usd")
     btc_dominance = fetch_btc_dominance()
     tvl_sol = (tvl_usd / sol_usd) if tvl_usd and sol_usd else None
     return {
