@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
@@ -19,11 +20,30 @@ st.set_page_config(page_title=APP_TITLE, page_icon="◎", layout="wide")
 
 
 # ------------------------------------------------------------
-# Formatierung
+# Formatierung / Hilfsfunktionen
 # ------------------------------------------------------------
 
+def is_missing(value: Any) -> bool:
+    try:
+        return value is None or pd.isna(value)
+    except Exception:
+        return value is None
+
+
+def get_value(row, *keys: str, default=None):
+    """Gibt den ersten vorhandenen, nicht-leeren Wert aus einer Row zurück."""
+    for key in keys:
+        try:
+            value = row.get(key)
+        except Exception:
+            value = None
+        if not is_missing(value):
+            return value
+    return default
+
+
 def fmt_usd(value) -> str:
-    if value is None or pd.isna(value):
+    if is_missing(value):
         return "n/a"
 
     value = float(value)
@@ -38,14 +58,14 @@ def fmt_usd(value) -> str:
 
 
 def fmt_num(value, decimals=2) -> str:
-    if value is None or pd.isna(value):
+    if is_missing(value):
         return "n/a"
 
     return f"{float(value):,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def fmt_pct(value, decimals=2) -> str:
-    if value is None or pd.isna(value):
+    if is_missing(value):
         return "n/a"
     return f"{float(value):+,.{decimals}f}%".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -61,69 +81,71 @@ def fmt_datetime_utc(dt) -> str:
 
 def safe_float(value, fallback=0.0) -> float:
     try:
-        if value is None or pd.isna(value):
+        if is_missing(value):
             return float(fallback)
         return float(value)
     except Exception:
         return float(fallback)
 
 
+def pct_delta(latest, prev, key):
+    if prev is None:
+        return None
+
+    current = get_value(latest, key)
+    old = get_value(prev, key)
+
+    if is_missing(current) or is_missing(old):
+        return None
+
+    old = float(old)
+    if old == 0:
+        return None
+
+    return (float(current) - old) / old * 100
+
+
+def row_to_dict(row) -> dict | None:
+    if row is None:
+        return None
+
+    result = {}
+
+    for k, v in row.to_dict().items():
+        if is_missing(v):
+            result[k] = None
+        elif isinstance(v, (int, float)):
+            result[k] = float(v)
+        else:
+            result[k] = v
+
+    return result
+
+
 # ------------------------------------------------------------
 # Solana Logo / Header
 # ------------------------------------------------------------
 
-SOLANA_LOGO_SVG = """
-<svg width="54" height="54" viewBox="0 0 397 311" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Solana Logo">
-  <defs>
-    <linearGradient id="solanaGradientTop" x1="360" y1="30" x2="40" y2="285" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#00FFA3"/>
-      <stop offset="0.52" stop-color="#DC1FFF"/>
-      <stop offset="1" stop-color="#9945FF"/>
-    </linearGradient>
-    <linearGradient id="solanaGradientMiddle" x1="360" y1="30" x2="40" y2="285" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#00FFA3"/>
-      <stop offset="0.52" stop-color="#DC1FFF"/>
-      <stop offset="1" stop-color="#9945FF"/>
-    </linearGradient>
-    <linearGradient id="solanaGradientBottom" x1="360" y1="30" x2="40" y2="285" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#00FFA3"/>
-      <stop offset="0.52" stop-color="#DC1FFF"/>
-      <stop offset="1" stop-color="#9945FF"/>
-    </linearGradient>
-  </defs>
-  <path d="M64 0H383C395 0 401 15 392 24L333 83C329 87 324 89 318 89H0L64 0Z" fill="url(#solanaGradientTop)"/>
-  <path d="M333 111H14C2 111 -4 96 5 87L64 28C68 24 73 22 79 22H397L333 111Z" opacity="0.96" transform="translate(0 89)" fill="url(#solanaGradientMiddle)"/>
-  <path d="M64 222H383C395 222 401 237 392 246L333 305C329 309 324 311 318 311H0L64 222Z" fill="url(#solanaGradientBottom)"/>
-</svg>
-"""
+SOLANA_LOGO_URL = "https://cryptologos.cc/logos/solana-sol-logo.png"
 
 
 def render_header():
-    st.markdown(
-        f"""
-        <div style="display:flex; align-items:center; gap:16px; margin-bottom:0.25rem;">
-            <div style="width:54px; height:54px; display:flex; align-items:center; justify-content:center;">
-                {SOLANA_LOGO_SVG}
-            </div>
-            <div>
-                <div style="font-size:2.35rem; font-weight:800; line-height:1.1; margin:0;">
-                    Solana Fundamental Monitor
-                </div>
-                <div style="font-size:0.95rem; opacity:0.75; margin-top:0.15rem;">
-                    Live-Markt, Fundamentaldaten, News und Investmentthese
-                </div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """Header ohne HTML/CSS, damit Streamlit keinen Code sichtbar rendert."""
+    logo_col, title_col = st.columns([0.07, 0.93])
+
+    with logo_col:
+        st.image(SOLANA_LOGO_URL, width=58)
+
+    with title_col:
+        st.title("Solana Fundamental Monitor")
+        st.caption("Live-Markt, Fundamentaldaten, News und Investmentthese")
 
 
 @st.cache_data(ttl=30)
 def fetch_live_market_data() -> dict:
     """
     Lädt Live-Marktdaten von CoinGecko.
-    Der Cache läuft nur 30 Sekunden, damit der Kurs quasi live bleibt,
+    Cache: 30 Sekunden, damit der Kurs fast live bleibt,
     ohne die API bei jedem Streamlit-Rerun zu überlasten.
     """
     url = (
@@ -205,36 +227,6 @@ def build_thesis_commentary(result: dict, latest, live: dict, past_available: bo
         parts.append("Die 30-Tage-Ampel wird aussagekräftiger, sobald mehr tägliche Historie gesammelt wurde.")
 
     return " ".join(parts)
-
-
-def pct_delta(latest, prev, key):
-    if prev is None:
-        return None
-
-    if pd.isna(prev.get(key)) or pd.isna(latest.get(key)):
-        return None
-
-    if float(prev.get(key)) == 0:
-        return None
-
-    return (float(latest.get(key)) - float(prev.get(key))) / float(prev.get(key)) * 100
-
-
-def row_to_dict(row) -> dict | None:
-    if row is None:
-        return None
-
-    result = {}
-
-    for k, v in row.to_dict().items():
-        if pd.isna(v):
-            result[k] = None
-        elif isinstance(v, (int, float)):
-            result[k] = float(v)
-        else:
-            result[k] = v
-
-    return result
 
 
 # ------------------------------------------------------------
@@ -394,7 +386,6 @@ if df.empty:
     )
     st.stop()
 
-# sicherstellen, dass snapshot_date als Datum erkannt wird
 if "snapshot_date" in df.columns:
     df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
 
@@ -413,10 +404,16 @@ current_dict = row_to_dict(latest)
 past_dict = row_to_dict(past) if past is not None else None
 result = compute_fundamental_score(current_dict, past_dict)
 
-sol_usd = float(latest.get("sol_usd") or 0)
-sol_btc = float(latest.get("sol_btc") or 0)
+sol_usd = safe_float(latest.get("sol_usd"), 0)
+sol_btc = safe_float(latest.get("sol_btc"), 0)
 
-# Live-Marktdaten: unabhängig vom täglichen Fundamentaldaten-Snapshot
+# Neue korrigierte DeFiLlama-Spalten mit Rückwärtskompatibilität.
+app_fees_usd = get_value(latest, "app_fees_usd", "fees_usd")
+app_revenue_usd = get_value(latest, "app_revenue_usd", "revenue_usd")
+chain_fees_usd = get_value(latest, "chain_fees_usd")
+chain_revenue_usd = get_value(latest, "chain_revenue_usd")
+
+# Live-Marktdaten: unabhängig vom täglichen Fundamentaldaten-Snapshot.
 live = fetch_live_market_data()
 sol_usd_live = safe_float(live.get("sol_usd_live"), sol_usd)
 sol_eur_live = live.get("sol_eur_live")
@@ -471,7 +468,7 @@ with st.sidebar:
         format="%.2f"
     )
 
-    # JitoSOL-Preis bevorzugt live von CoinGecko; Fallback über SOL/USD × JitoSOL/SOL-Verhältnis
+    # JitoSOL-Preis bevorzugt live von CoinGecko; Fallback über SOL/USD × JitoSOL/SOL-Verhältnis.
     jitosol_sol_ratio = sol_equivalent / jitosol_amount if jitosol_amount else 0
     if jitosol_usd_live:
         current_jitosol_price = float(jitosol_usd_live)
@@ -582,13 +579,13 @@ with fundamentals:
     )
 
     c.metric(
-        "Stablecoins",
+        "Stablecoins Mcap",
         fmt_usd(latest.get("stablecoins_usd")),
         None if prev is None else f"{pct_delta(latest, prev, 'stablecoins_usd'):+.1f}%"
     )
 
     d.metric(
-        "RWA",
+        "RWA Active Mcap",
         fmt_usd(latest.get("rwa_usd")),
         None if prev is None else f"{pct_delta(latest, prev, 'rwa_usd'):+.1f}%"
     )
@@ -602,19 +599,47 @@ with fundamentals:
     )
 
     f.metric(
-        "Fees 24h",
-        fmt_usd(latest.get("fees_usd")),
-        None if prev is None else f"{pct_delta(latest, prev, 'fees_usd'):+.1f}%"
+        "App Fees 24h",
+        fmt_usd(app_fees_usd),
+        None if prev is None else f"{pct_delta(latest, prev, 'app_fees_usd'):+.1f}%" if "app_fees_usd" in latest.index else None
     )
 
     g.metric(
-        "Revenue 24h",
-        fmt_usd(latest.get("revenue_usd")),
-        None if prev is None else f"{pct_delta(latest, prev, 'revenue_usd'):+.1f}%"
+        "App Revenue 24h",
+        fmt_usd(app_revenue_usd),
+        None if prev is None else f"{pct_delta(latest, prev, 'app_revenue_usd'):+.1f}%" if "app_revenue_usd" in latest.index else None
     )
 
     active = latest.get("active_addresses")
-    h.metric("Active Addresses", "n/a" if pd.isna(active) else fmt_num(active, 0))
+    h.metric("Active Addresses 24h", "n/a" if is_missing(active) else fmt_num(active, 0))
+
+    i, j, k, l = st.columns(4)
+
+    i.metric(
+        "Chain Fees 24h",
+        fmt_usd(chain_fees_usd),
+        None if prev is None else f"{pct_delta(latest, prev, 'chain_fees_usd'):+.1f}%" if "chain_fees_usd" in latest.index else None
+    )
+
+    j.metric(
+        "Chain Revenue 24h",
+        fmt_usd(chain_revenue_usd),
+        None if prev is None else f"{pct_delta(latest, prev, 'chain_revenue_usd'):+.1f}%" if "chain_revenue_usd" in latest.index else None
+    )
+
+    k.metric("BTC/USD Snapshot", fmt_usd(latest.get("btc_usd")))
+
+    btc_dom = latest.get("btc_dominance")
+    l.metric(
+        "BTC Dominanz",
+        "n/a" if is_missing(btc_dom) else f"{float(btc_dom):.1f}%"
+    )
+
+    st.caption(
+        "Hinweis: Stablecoins, RWA, DEX-Volumen, App Fees/App Revenue und Chain Fees/Chain Revenue "
+        "sind bewusst getrennt, weil DeFiLlama diese Kennzahlen unterschiedlich definiert. "
+        "RWA meint hier die möglichst DeFiLlama-nahe RWA Active Mcap."
+    )
 
     st.subheader("30-Tage-Ampel")
 
@@ -681,12 +706,6 @@ with market:
         None if btc_24h_change is None else fmt_pct(btc_24h_change) + " 24h"
     )
     x4.metric("SOL/BTC", f"{sol_btc:.6f}")
-
-    btc_dom = latest.get("btc_dominance")
-    st.metric(
-        "BTC Dominanz (täglicher Snapshot)",
-        "n/a" if pd.isna(btc_dom) else f"{float(btc_dom):.1f}%"
-    )
 
     if live_last_update:
         st.caption(f"Live-Daten zuletzt abgefragt: {fmt_datetime_utc(live_last_update)}")
@@ -783,26 +802,38 @@ with news:
 with history:
     st.subheader("Verlauf")
 
-    options = {
+    all_options = {
         "fundamental_score": "Fundamental Score",
-        "sol_usd": "SOL/USD",
+        "sol_usd": "SOL/USD Snapshot",
         "sol_btc": "SOL/BTC",
         "tvl_usd": "TVL USD",
         "tvl_sol": "TVL in SOL",
-        "stablecoins_usd": "Stablecoins",
-        "rwa_usd": "RWA",
+        "stablecoins_usd": "Stablecoins Mcap",
+        "rwa_usd": "RWA Active Mcap",
         "dex_volume_usd": "DEX Volumen",
-        "fees_usd": "Fees",
+        "app_fees_usd": "App Fees 24h",
+        "app_revenue_usd": "App Revenue 24h",
+        "chain_fees_usd": "Chain Fees 24h",
+        "chain_revenue_usd": "Chain Revenue 24h",
+        "active_addresses": "Active Addresses 24h",
+        # Rückwärtskompatibilität für alte CSVs:
+        "fees_usd": "Fees 24h (alt)",
+        "revenue_usd": "Revenue 24h (alt)",
     }
 
-    choice = st.selectbox(
-        "Kennzahl",
-        list(options),
-        format_func=lambda x: options[x]
-    )
+    options = {key: label for key, label in all_options.items() if key in df.columns}
 
-    chart_df = df.set_index("snapshot_date")[[choice]].dropna()
-    st.line_chart(chart_df)
+    if not options:
+        st.info("Keine Verlaufsspalten verfügbar.")
+    else:
+        choice = st.selectbox(
+            "Kennzahl",
+            list(options),
+            format_func=lambda x: options[x]
+        )
+
+        chart_df = df.set_index("snapshot_date")[[choice]].dropna()
+        st.line_chart(chart_df)
 
 
 # ------------------------------------------------------------
