@@ -1,71 +1,65 @@
-"""Speicher-Layer: Supabase wenn konfiguriert, sonst lokale CSV-Datei."""
-
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from dotenv import load_dotenv
 
-from config import LOCAL_CSV, TABLE
-
-load_dotenv()
+from config import LOCAL_DATA_CSV, load_runtime_config
 
 
-def supabase_available(write: bool = False) -> bool:
-    if not os.getenv("SUPABASE_URL"):
-        return False
-    if write:
-        return bool(os.getenv("SUPABASE_SERVICE_KEY"))
-    return bool(os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_KEY"))
+def ensure_data_dir() -> None:
+    Path("data").mkdir(exist_ok=True)
 
 
-def get_supabase_client(write: bool = False):
-    from supabase import create_client
+def load_history(days: int = 3650, path: str = LOCAL_DATA_CSV) -> pd.DataFrame:
+    ensure_data_dir()
+    file_path = Path(path)
+    if not file_path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(file_path)
+    if df.empty:
+        return df
+    if "snapshot_date" in df.columns:
+        df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
+        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
+        df = df[df["snapshot_date"] >= cutoff].copy()
+        df = df.sort_values("snapshot_date")
+    return df
 
-    key = os.getenv("SUPABASE_SERVICE_KEY") if write else (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_KEY"))
-    return create_client(os.environ["SUPABASE_URL"], key)
+
+def upsert_local_row(row: dict[str, Any], path: str = LOCAL_DATA_CSV) -> None:
+    ensure_data_dir()
+    file_path = Path(path)
+    if file_path.exists():
+        df = pd.read_csv(file_path)
+    else:
+        df = pd.DataFrame()
+    row_df = pd.DataFrame([row])
+    if df.empty or "snapshot_date" not in df.columns:
+        df = row_df
+    else:
+        df = df[df["snapshot_date"].astype(str) != str(row["snapshot_date"])]
+        df = pd.concat([df, row_df], ignore_index=True)
+    if "snapshot_date" in df.columns:
+        df = df.sort_values("snapshot_date")
+    df.to_csv(file_path, index=False)
 
 
 def upsert_row(row: dict[str, Any]) -> None:
-    if supabase_available(write=True):
-        client = get_supabase_client(write=True)
-        client.table(TABLE).upsert(row, on_conflict="snapshot_date").execute()
-        return
+    # V4 keeps fundamentals in versioned CSV for reproducibility. Portfolio is stored in Supabase.
+    upsert_local_row(row)
 
-    path = Path(LOCAL_CSV)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    new = pd.DataFrame([row])
-    if path.exists():
-        df = pd.read_csv(path)
-        df = df[df["snapshot_date"] != row["snapshot_date"]]
-        df = pd.concat([df, new], ignore_index=True)
+
+def append_news_rows(rows: list[dict[str, Any]], path: str = "data/news_items.csv") -> None:
+    ensure_data_dir()
+    file_path = Path(path)
+    existing = pd.read_csv(file_path) if file_path.exists() else pd.DataFrame()
+    new = pd.DataFrame(rows)
+    if existing.empty:
+        out = new
     else:
-        df = new
-    df = df.sort_values("snapshot_date")
-    df.to_csv(path, index=False)
-
-
-def load_history(days: int = 365) -> pd.DataFrame:
-    if supabase_available(write=False):
-        import datetime as dt
-
-        client = get_supabase_client(write=False)
-        since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
-        resp = client.table(TABLE).select("*").gte("snapshot_date", since).order("snapshot_date", desc=False).execute()
-        df = pd.DataFrame(resp.data)
-    else:
-        path = Path(LOCAL_CSV)
-        if not path.exists():
-            return pd.DataFrame()
-        df = pd.read_csv(path)
-        if not df.empty:
-            cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=days)
-            df = df[pd.to_datetime(df["snapshot_date"]) >= cutoff]
-
-    if not df.empty:
-        df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
-        df = df.sort_values("snapshot_date")
-    return df
+        out = pd.concat([existing, new], ignore_index=True)
+        if "link" in out.columns:
+            out = out.drop_duplicates(subset=["link"], keep="last")
+    out.to_csv(file_path, index=False)

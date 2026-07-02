@@ -1,145 +1,95 @@
-"""Oeffentliche Datenquellen fuer den Solana Fundamental Monitor.
-
-Ziel: Die Werte sollen moeglichst eng an die Solana-Seite von DeFiLlama
-angelehnt sein. Wichtig: DeFiLlama unterscheidet zwischen Chain Fees/Revenue
-und App Fees/App Revenue. Deshalb werden, soweit moeglich, beide Varianten
-bereitgestellt.
-"""
-
 from __future__ import annotations
 
-import re
+import datetime as dt
 import time
 from typing import Any
 
+import pandas as pd
 import requests
 
-TIMEOUT = 25
-HEADERS = {"User-Agent": "solana-fundamental-monitor/2.1"}
+from config import (
+    COINBASE_CANDLES_URL,
+    COINGECKO_GLOBAL_URL,
+    COINGECKO_MARKET_CHART_URL,
+    COINGECKO_PRICE_URL,
+    COINGLASS_BASE_URL,
+    COINGLASS_FUNDING_ENDPOINT,
+    COINGLASS_LIQUIDATION_HEATMAP_ENDPOINT,
+    COINGLASS_OPEN_INTEREST_ENDPOINT,
+    COINGLASS_PAIR_HEATMAP_ENDPOINT,
+    DEFILLAMA_DEX_URL,
+    DEFILLAMA_FEES_URL,
+    DEFILLAMA_PROTOCOLS_URL,
+    DEFILLAMA_RWA_PRO_URL_TEMPLATE,
+    DEFILLAMA_STABLES_URL,
+    DEFILLAMA_TVL_URL,
+    DEFAULT_COINGLASS_EXCHANGE,
+    DEFAULT_COINGLASS_PAIR,
+    DEFAULT_COINGLASS_SYMBOL,
+    DEFAULT_PRODUCT_ID,
+    REQUEST_TIMEOUT,
+    USER_AGENT,
+    load_runtime_config,
+)
+from formatting import safe_float
 
-COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
-COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
-
-DEFILLAMA_CHAIN_PAGE_URL = "https://defillama.com/chain/solana"
-DEFILLAMA_TVL_URL = "https://api.llama.fi/v2/historicalChainTvl/Solana"
-DEFILLAMA_STABLES_CHART_URL = "https://stablecoins.llama.fi/stablecoincharts/Solana"
-DEFILLAMA_STABLES_CHAINS_URL = "https://stablecoins.llama.fi/stablecoinchains"
-DEFILLAMA_PROTOCOLS_URL = "https://api.llama.fi/protocols"
-DEFILLAMA_DEX_URL = "https://api.llama.fi/overview/dexs/Solana"
-DEFILLAMA_FEES_URL = "https://api.llama.fi/overview/fees/Solana"
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 
 
-def get_json(url: str, params: dict[str, Any] | None = None, retries: int = 2) -> Any | None:
+def get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None, retries: int = 2) -> Any | None:
+    merged_headers = dict(HEADERS)
+    if headers:
+        merged_headers.update(headers)
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.json()
+            response = requests.get(url, params=params, headers=merged_headers, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            return response.json()
         except Exception:
             if attempt == retries:
                 return None
-            time.sleep(1.0 + attempt)
+            time.sleep(1 + attempt)
     return None
 
 
-def get_text(url: str, retries: int = 2) -> str | None:
-    for attempt in range(retries + 1):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.text
-        except Exception:
-            if attempt == retries:
-                return None
-            time.sleep(1.0 + attempt)
-    return None
+def ts_to_date(ts: int | float) -> str:
+    return dt.datetime.fromtimestamp(float(ts), tz=dt.timezone.utc).date().isoformat()
 
 
-def _parse_compact_number(raw: str, suffix: str | None = None) -> float | None:
-    """Parst DeFiLlama-Strings wie 15.09b, 587,533, 2.85m."""
-    if not raw:
-        return None
-
-    text = str(raw).strip().replace("$", "").replace(",", "")
-    local_suffix = suffix or ""
-
-    # Falls Suffix direkt am Wert haengt, z. B. 15.09b
-    match = re.match(r"^(-?\d+(?:\.\d+)?)([kmbtKMBT]?)$", text)
-    if match:
-        value = float(match.group(1))
-        local_suffix = match.group(2) or local_suffix
-    else:
-        try:
-            value = float(text)
-        except Exception:
-            return None
-
-    multiplier = {
-        "": 1,
-        "k": 1e3,
-        "m": 1e6,
-        "b": 1e9,
-        "t": 1e12,
-    }.get(local_suffix.lower(), 1)
-
-    return value * multiplier
-
-
-_CHAIN_PAGE_CACHE: dict[str, float | None] | None = None
-
-
-def fetch_defillama_chain_page_metrics() -> dict[str, float | None]:
-    """Liest zentrale Kennzahlen aus der sichtbaren Solana-Seite von DeFiLlama.
-
-    Das ist absichtlich ein Fallback/Abgleich fuer Werte, die DeFiLlama zwar
-    im UI zeigt, aber nicht immer sauber ueber einen dokumentierten freien API-
-    Endpunkt verfuegbar macht (z. B. RWA Active Mcap, Active Addresses).
-    """
-    global _CHAIN_PAGE_CACHE
-    if _CHAIN_PAGE_CACHE is not None:
-        return _CHAIN_PAGE_CACHE
-
-    html = get_text(DEFILLAMA_CHAIN_PAGE_URL) or ""
-    compact = re.sub(r"\s+", " ", html)
-
-    def money_after(label: str) -> float | None:
-        # Beispiel: RWA Active Mcap$2.006b oder Chain Fees (24h)$587,533
-        pattern = re.escape(label) + r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)([kmbtKMBT]?)"
-        m = re.search(pattern, compact, flags=re.IGNORECASE)
-        if not m:
-            return None
-        return _parse_compact_number(m.group(1), m.group(2))
-
-    def number_after(label: str) -> float | None:
-        # Beispiel: Active Addresses (24h)2.85m
-        pattern = re.escape(label) + r"\s*([0-9][0-9,]*(?:\.[0-9]+)?)([kmbtKMBT]?)"
-        m = re.search(pattern, compact, flags=re.IGNORECASE)
-        if not m:
-            return None
-        return _parse_compact_number(m.group(1), m.group(2))
-
-    _CHAIN_PAGE_CACHE = {
-        "stablecoins_usd": money_after("Stablecoins Mcap"),
-        "rwa_usd": money_after("RWA Active Mcap"),
-        "chain_fees_usd": money_after("Chain Fees (24h)"),
-        "chain_revenue_usd": money_after("Chain Revenue (24h)"),
-        "app_fees_usd": money_after("App Fees (24h)"),
-        "app_revenue_usd": money_after("App Revenue (24h)"),
-        "dex_volume_usd": money_after("DEXs Volume (24h)"),
-        "active_addresses": number_after("Active Addresses (24h)"),
-        "transactions_24h": number_after("Transactions (24h)"),
-        "bridged_tvl_usd": money_after("Bridged TVL"),
-    }
-    return _CHAIN_PAGE_CACHE
-
-
-def fetch_price() -> tuple[float | None, float | None, float | None]:
-    data = get_json(COINGECKO_PRICE_URL, {"ids": "solana,bitcoin", "vs_currencies": "usd,btc"})
-    if not data:
-        return None, None, None
+def fetch_live_market() -> dict[str, Any]:
+    data = get_json(
+        COINGECKO_PRICE_URL,
+        {
+            "ids": "solana,jito-staked-sol,bitcoin",
+            "vs_currencies": "usd,eur,btc",
+            "include_24hr_change": "true",
+            "include_market_cap": "true",
+            "include_24hr_vol": "true",
+        },
+    ) or {}
     sol = data.get("solana", {})
+    jito = data.get("jito-staked-sol", {})
     btc = data.get("bitcoin", {})
-    return sol.get("usd"), sol.get("btc"), btc.get("usd")
+    return {
+        "sol_usd": sol.get("usd"),
+        "sol_eur": sol.get("eur"),
+        "sol_btc": sol.get("btc"),
+        "sol_24h_change": sol.get("usd_24h_change"),
+        "sol_market_cap": sol.get("usd_market_cap"),
+        "sol_volume_24h": sol.get("usd_24h_vol"),
+        "jitosol_usd": jito.get("usd"),
+        "jitosol_eur": jito.get("eur"),
+        "jitosol_24h_change": jito.get("usd_24h_change"),
+        "btc_usd": btc.get("usd"),
+        "btc_eur": btc.get("eur"),
+        "btc_24h_change": btc.get("usd_24h_change"),
+        "timestamp": dt.datetime.now(dt.timezone.utc),
+    }
+
+
+def fetch_price_snapshot() -> tuple[float | None, float | None, float | None]:
+    live = fetch_live_market()
+    return live.get("sol_usd"), live.get("sol_btc"), live.get("btc_usd")
 
 
 def fetch_btc_dominance() -> float | None:
@@ -150,7 +100,7 @@ def fetch_btc_dominance() -> float | None:
         return None
 
 
-def fetch_tvl_usd() -> float | None:
+def fetch_current_tvl_usd() -> float | None:
     data = get_json(DEFILLAMA_TVL_URL)
     try:
         return float(data[-1]["tvl"])
@@ -158,57 +108,37 @@ def fetch_tvl_usd() -> float | None:
         return None
 
 
-def fetch_stablecoins_usd() -> float | None:
-    # 1) Besserer Abgleich mit DeFiLlama Chain Page, falls verfuegbar
-    page_value = fetch_defillama_chain_page_metrics().get("stablecoins_usd")
-    if page_value is not None:
-        return page_value
+def fetch_historical_tvl() -> dict[str, float]:
+    data = get_json(DEFILLAMA_TVL_URL) or []
+    out: dict[str, float] = {}
+    for row in data:
+        try:
+            out[ts_to_date(row["date"])] = float(row["tvl"])
+        except Exception:
+            continue
+    return out
 
-    # 2) Stablecoins-by-chain API
-    chains = get_json(DEFILLAMA_STABLES_CHAINS_URL)
-    try:
-        for chain in chains or []:
-            if str(chain.get("name", "")).lower() == "solana":
-                for key in ("totalCirculatingUSD", "mcap", "total", "circulating"):
-                    value = chain.get(key)
-                    if isinstance(value, dict):
-                        return float(sum(value.values()))
-                    if value is not None:
-                        return float(value)
-    except Exception:
-        pass
 
-    # 3) Historischer Chart als Fallback
-    data = get_json(DEFILLAMA_STABLES_CHART_URL)
+def fetch_current_stablecoins_usd() -> float | None:
+    data = get_json(DEFILLAMA_STABLES_URL)
     try:
         last = data[-1]
-        total = last.get("totalCirculatingUSD", {})
-        if isinstance(total, dict):
-            return float(sum(total.values()))
-        return float(total)
+        return float(sum((last.get("totalCirculatingUSD") or {}).values()))
     except Exception:
         return None
 
 
-def fetch_rwa_usd() -> float | None:
-    # DeFiLlama UI: RWA Active Mcap
-    page_value = fetch_defillama_chain_page_metrics().get("rwa_usd")
-    if page_value is not None:
-        return page_value
-
-    # Fallback: RWA-Protokolle mit Chain TVL auf Solana.
-    # Achtung: Das ist NICHT identisch mit RWA Active Mcap.
-    protocols = get_json(DEFILLAMA_PROTOCOLS_URL)
-    if not protocols:
-        return None
-    total = 0.0
-    for p in protocols:
-        if (p.get("category") or "").lower() != "rwa":
+def fetch_historical_stablecoins() -> dict[str, float]:
+    data = get_json(DEFILLAMA_STABLES_URL) or []
+    out: dict[str, float] = {}
+    for row in data:
+        try:
+            total = row.get("totalCirculatingUSD", {})
+            if isinstance(total, dict):
+                out[ts_to_date(row["date"])] = float(sum(total.values()))
+        except Exception:
             continue
-        if "Solana" not in (p.get("chains") or []):
-            continue
-        total += float((p.get("chainTvls") or {}).get("Solana", 0) or 0)
-    return total if total > 0 else None
+    return out
 
 
 def _last_total_from_llama_overview(data: Any) -> float | None:
@@ -229,79 +159,178 @@ def _last_total_from_llama_overview(data: Any) -> float | None:
     return None
 
 
-def _protocol_value_from_overview(data: Any, protocol_name: str, category: str | None = None) -> float | None:
-    if not isinstance(data, dict):
-        return None
-    for p in data.get("protocols", []) or []:
-        name = str(p.get("name", "")).lower()
-        cat = str(p.get("category", "")).lower()
-        if name != protocol_name.lower():
+def _history_from_llama_overview(url: str, data_type: str) -> dict[str, float]:
+    data = get_json(url, {"excludeTotalDataChartBreakdown": "true", "dataType": data_type}) or {}
+    chart = data.get("totalDataChart") or []
+    out: dict[str, float] = {}
+    for row in chart:
+        try:
+            out[ts_to_date(row[0])] = float(row[1])
+        except Exception:
             continue
-        if category and cat != category.lower():
-            continue
-        for key in ("total24h", "total1d", "dailyFees", "dailyRevenue", "fees24h", "revenue24h"):
-            if p.get(key) is not None:
-                try:
-                    return float(p[key])
-                except Exception:
-                    pass
-    return None
+    return out
 
 
-def fetch_dex_volume_usd() -> float | None:
-    page_value = fetch_defillama_chain_page_metrics().get("dex_volume_usd")
-    if page_value is not None:
-        return page_value
-
+def fetch_current_dex_volume_usd() -> float | None:
     data = get_json(DEFILLAMA_DEX_URL, {"excludeTotalDataChartBreakdown": "true", "dataType": "dailyVolume"})
     return _last_total_from_llama_overview(data)
 
 
-def fetch_app_fees_usd() -> float | None:
-    page_value = fetch_defillama_chain_page_metrics().get("app_fees_usd")
-    if page_value is not None:
-        return page_value
+def fetch_historical_dex_volume() -> dict[str, float]:
+    return _history_from_llama_overview(DEFILLAMA_DEX_URL, "dailyVolume")
 
+
+def fetch_current_app_fees_usd() -> float | None:
     data = get_json(DEFILLAMA_FEES_URL, {"excludeTotalDataChartBreakdown": "true", "dataType": "dailyFees"})
     return _last_total_from_llama_overview(data)
 
 
-def fetch_app_revenue_usd() -> float | None:
-    page_value = fetch_defillama_chain_page_metrics().get("app_revenue_usd")
-    if page_value is not None:
-        return page_value
-
+def fetch_current_app_revenue_usd() -> float | None:
     data = get_json(DEFILLAMA_FEES_URL, {"excludeTotalDataChartBreakdown": "true", "dataType": "dailyRevenue"})
     return _last_total_from_llama_overview(data)
 
 
-def fetch_chain_fees_usd() -> float | None:
-    page_value = fetch_defillama_chain_page_metrics().get("chain_fees_usd")
-    if page_value is not None:
-        return page_value
-
-    data = get_json(DEFILLAMA_FEES_URL, {"excludeTotalDataChartBreakdown": "true", "dataType": "dailyFees"})
-    return _protocol_value_from_overview(data, "Solana", "Chain")
+def fetch_historical_fees(data_type: str) -> dict[str, float]:
+    return _history_from_llama_overview(DEFILLAMA_FEES_URL, data_type)
 
 
-def fetch_chain_revenue_usd() -> float | None:
-    page_value = fetch_defillama_chain_page_metrics().get("chain_revenue_usd")
-    if page_value is not None:
-        return page_value
-
-    data = get_json(DEFILLAMA_FEES_URL, {"excludeTotalDataChartBreakdown": "true", "dataType": "dailyRevenue"})
-    return _protocol_value_from_overview(data, "Solana", "Chain")
+def fetch_current_chain_metrics_scrape_fallback() -> dict[str, Any]:
+    # DefiLlama chain page exposes these in the UI. The public API does not consistently expose
+    # all chain-level metrics, so V4 keeps them optional unless a reliable endpoint is available.
+    return {"chain_fees_usd": None, "chain_revenue_usd": None, "active_addresses": None, "transactions_24h": None}
 
 
-# Rueckwaertskompatibilitaet: die App nutzt bisher fees_usd/revenue_usd.
-# Diese Werte sind App Fees/App Revenue, nicht Chain Fees/Revenue.
-def fetch_fees_usd() -> float | None:
-    return fetch_app_fees_usd()
+def fetch_rwa_active_mcap_usd() -> float | None:
+    cfg = load_runtime_config()
+    # Preferred path if user has DefiLlama Pro. Public DeFiLlama RWA UI exists, but historical/API
+    # RWA chain endpoints are Pro-only according to DefiLlama API docs.
+    if cfg.defillama_api_key:
+        data = get_json(DEFILLAMA_RWA_PRO_URL_TEMPLATE.format(api_key=cfg.defillama_api_key))
+        try:
+            if isinstance(data, dict):
+                for key in ("activeMcap", "active_mcap", "totalActiveMcap", "total_rwa_active_mcap"):
+                    if data.get(key) is not None:
+                        return float(data[key])
+                if isinstance(data.get("data"), dict):
+                    d = data["data"]
+                    for key in ("activeMcap", "active_mcap", "totalActiveMcap"):
+                        if d.get(key) is not None:
+                            return float(d[key])
+        except Exception:
+            pass
+    # Public fallback: sum protocol chain TVL for protocols marked RWA on Solana. This is NOT the
+    # same as DeFiLlama RWA Active Mcap, but avoids a blank if Pro API is not available.
+    protocols = get_json(DEFILLAMA_PROTOCOLS_URL) or []
+    total = 0.0
+    found = False
+    for p in protocols:
+        try:
+            if (p.get("category") or "").lower() != "rwa":
+                continue
+            if "Solana" not in (p.get("chains") or []):
+                continue
+            total += float((p.get("chainTvls") or {}).get("Solana", 0) or 0)
+            found = True
+        except Exception:
+            continue
+    return total if found else None
 
 
-def fetch_revenue_usd() -> float | None:
-    return fetch_app_revenue_usd()
+def fetch_coin_market_chart(coin_id: str, days: int = 365) -> pd.DataFrame:
+    url = COINGECKO_MARKET_CHART_URL.format(coin_id=coin_id)
+    data = get_json(url, {"vs_currency": "usd", "days": days, "interval": "daily"}) or {}
+    rows = []
+    for item in data.get("prices", []):
+        try:
+            ms, price = item
+            rows.append({"snapshot_date": dt.datetime.fromtimestamp(ms / 1000, tz=dt.timezone.utc).date().isoformat(), coin_id + "_usd": float(price)})
+        except Exception:
+            continue
+    return pd.DataFrame(rows).drop_duplicates("snapshot_date") if rows else pd.DataFrame()
 
 
-def fetch_active_addresses() -> float | None:
-    return fetch_defillama_chain_page_metrics().get("active_addresses")
+def fetch_coinbase_candles(product_id: str = DEFAULT_PRODUCT_ID, days: int = 7, granularity: int = 3600) -> pd.DataFrame:
+    # Coinbase Exchange caps responses. We request at most 300 candles, truncating range if needed.
+    max_seconds = granularity * 290
+    requested_seconds = int(days * 86400)
+    seconds = min(requested_seconds, max_seconds)
+    end = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    start = end - dt.timedelta(seconds=seconds)
+    url = COINBASE_CANDLES_URL.format(product_id=product_id)
+    data = get_json(url, {"start": start.isoformat(), "end": end.isoformat(), "granularity": granularity}) or []
+    rows = []
+    for c in data:
+        try:
+            ts, low, high, open_, close, volume = c
+            rows.append({"time": dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc), "open": float(open_), "high": float(high), "low": float(low), "close": float(close), "volume": float(volume)})
+        except Exception:
+            continue
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("time")
+    return df
+
+
+def fetch_snapshot() -> dict[str, Any]:
+    sol_usd, sol_btc, btc_usd = fetch_price_snapshot()
+    tvl_usd = fetch_current_tvl_usd()
+    stablecoins_usd = fetch_current_stablecoins_usd()
+    dex_volume_usd = fetch_current_dex_volume_usd()
+    app_fees_usd = fetch_current_app_fees_usd()
+    app_revenue_usd = fetch_current_app_revenue_usd()
+    chain = fetch_current_chain_metrics_scrape_fallback()
+    rwa_usd = fetch_rwa_active_mcap_usd()
+    btc_dominance = fetch_btc_dominance()
+    tvl_sol = (tvl_usd / sol_usd) if tvl_usd and sol_usd else None
+    return {
+        "sol_usd": sol_usd,
+        "sol_btc": sol_btc,
+        "btc_usd": btc_usd,
+        "btc_dominance": btc_dominance,
+        "tvl_usd": tvl_usd,
+        "tvl_sol": tvl_sol,
+        "stablecoins_usd": stablecoins_usd,
+        "rwa_usd": rwa_usd,
+        "dex_volume_usd": dex_volume_usd,
+        "app_fees_usd": app_fees_usd,
+        "app_revenue_usd": app_revenue_usd,
+        "fees_usd": app_fees_usd,
+        "revenue_usd": app_revenue_usd,
+        "chain_fees_usd": chain.get("chain_fees_usd"),
+        "chain_revenue_usd": chain.get("chain_revenue_usd"),
+        "active_addresses": chain.get("active_addresses"),
+        "transactions_24h": chain.get("transactions_24h"),
+    }
+
+
+def fetch_coinglass_heatmap(symbol: str = DEFAULT_COINGLASS_SYMBOL, pair: str = DEFAULT_COINGLASS_PAIR, exchange: str = DEFAULT_COINGLASS_EXCHANGE, model: str = "aggregated") -> dict[str, Any]:
+    cfg = load_runtime_config()
+    if not cfg.coinglass_api_key:
+        return {"ok": False, "message": "COINGLASS_API_KEY fehlt. Liquidation Levels werden erst mit API-Key geladen.", "data": None}
+    endpoint = COINGLASS_LIQUIDATION_HEATMAP_ENDPOINT if model == "aggregated" else COINGLASS_PAIR_HEATMAP_ENDPOINT
+    url = COINGLASS_BASE_URL + endpoint
+    headers = {"CG-API-KEY": cfg.coinglass_api_key}
+    params = {"symbol": symbol, "pair": pair, "exchange": exchange}
+    data = get_json(url, params=params, headers=headers)
+    if not data:
+        return {"ok": False, "message": "CoinGlass lieferte keine Daten oder der Plan unterstützt den Endpoint nicht.", "data": None}
+    return {"ok": True, "message": "ok", "data": data}
+
+
+def summarize_liquidation_levels(heatmap: dict[str, Any], current_price: float | None = None, top_n: int = 8) -> list[dict[str, Any]]:
+    if not heatmap.get("ok") or not isinstance(heatmap.get("data"), dict):
+        return []
+    payload = heatmap["data"].get("data", heatmap["data"])
+    y_axis = payload.get("y_axis") or []
+    points = payload.get("liquidation_leverage_data") or []
+    levels: dict[float, float] = {}
+    for p in points:
+        try:
+            _x_idx, y_idx, value = p
+            price = float(y_axis[int(y_idx)])
+            levels[price] = levels.get(price, 0.0) + float(value)
+        except Exception:
+            continue
+    rows = [{"price": price, "liquidation_value": value, "side": "oberhalb" if current_price and price > current_price else "unterhalb" if current_price and price < current_price else "n/a"} for price, value in levels.items()]
+    rows.sort(key=lambda r: r["liquidation_value"], reverse=True)
+    return rows[:top_n]
