@@ -137,7 +137,7 @@ def row_to_dict(row) -> dict | None:
 def get_latest_context():
     df = load_history(days=3650)
     if df.empty:
-        return df, None, None, None, compute_fundamental_score({}, None)
+        return df, None, None, None, compute_fundamental_score({}, None, None)
     df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
     df = df.sort_values("snapshot_date")
     latest_row = df.iloc[-1]
@@ -146,7 +146,7 @@ def get_latest_context():
     past_candidates = df[df["snapshot_date"] <= target]
     past = past_candidates.iloc[-1] if not past_candidates.empty else None
     latest = merge_missing_current_metrics(row_to_dict(latest_row))
-    result = compute_fundamental_score(latest or {}, row_to_dict(past) if past is not None else None)
+    result = compute_fundamental_score(latest or {}, row_to_dict(past) if past is not None else None, df)
     return df, latest, prev, past, result
 
 
@@ -267,9 +267,20 @@ def render_fundamentals_tab(df, latest, prev, result) -> None:
     for idx, (label, key, formatter) in enumerate(metrics):
         cols[idx % 4].metric(label, formatter(latest.get(key)), None if prev is None else (None if pct_delta(latest, prev, key) is None else fmt_pct(pct_delta(latest, prev, key))))
     st.subheader("30-Tage-Ampel")
+    st.caption("Bestandswerte werden gegen den Stand vor ca. 30 Tagen verglichen. DEX/Fees/Revenue werden als 30D-Rolling-Summe gegen die vorherigen 30 Tage bewertet. Active Addresses werden geglättet.")
     rows = []
     for item in result.get("details", []):
-        rows.append({"Ampel": traffic_light(item.get("growth_pct")), "Kennzahl": item.get("label"), "Score": round(item.get("score", 50), 1), "30T": "Zu wenig Historie" if item.get("growth_pct") is None else fmt_pct(item.get("growth_pct")), "Gewicht": fmt_pct(item.get("weight", 0) * 100, 0)})
+        trend = item.get("trend_pct", item.get("growth_pct"))
+        comparison = item.get("comparison") or ("Zu wenig Historie" if trend is None else "30T")
+        rows.append({
+            "Ampel": traffic_light(trend),
+            "Kennzahl": item.get("label"),
+            "Score": round(item.get("score", 50), 1),
+            "Vergleich": comparison,
+            "Veränderung": "Zu wenig Historie" if trend is None else fmt_pct(trend),
+            "Gewicht": fmt_pct(item.get("weight", 0) * 100, 0),
+            "Bewertung": item.get("note", ""),
+        })
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
