@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 
 from config import APP_TITLE, WATCHLIST_JSON
 from score import LABELS, WEIGHTS, compute_fundamental_score, interpretation_text, traffic_light
@@ -16,34 +21,17 @@ from storage import load_history
 
 load_dotenv()
 
-st.set_page_config(page_title=APP_TITLE, page_icon="◎", layout="wide")
+SOLANA_LOGO_URL = "https://cryptologos.cc/logos/solana-sol-logo.png"
+
+st.set_page_config(page_title=APP_TITLE, page_icon="🟣", layout="wide")
 
 
 # ------------------------------------------------------------
-# Formatierung / Hilfsfunktionen
+# Formatierung
 # ------------------------------------------------------------
-
-def is_missing(value: Any) -> bool:
-    try:
-        return value is None or pd.isna(value)
-    except Exception:
-        return value is None
-
-
-def get_value(row, *keys: str, default=None):
-    """Gibt den ersten vorhandenen, nicht-leeren Wert aus einer Row zurück."""
-    for key in keys:
-        try:
-            value = row.get(key)
-        except Exception:
-            value = None
-        if not is_missing(value):
-            return value
-    return default
-
 
 def fmt_usd(value) -> str:
-    if is_missing(value):
+    if value is None or pd.isna(value):
         return "n/a"
 
     value = float(value)
@@ -58,14 +46,14 @@ def fmt_usd(value) -> str:
 
 
 def fmt_num(value, decimals=2) -> str:
-    if is_missing(value):
+    if value is None or pd.isna(value):
         return "n/a"
 
     return f"{float(value):,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def fmt_pct(value, decimals=2) -> str:
-    if is_missing(value):
+    if value is None or pd.isna(value):
         return "n/a"
     return f"{float(value):+,.{decimals}f}%".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -81,71 +69,38 @@ def fmt_datetime_utc(dt) -> str:
 
 def safe_float(value, fallback=0.0) -> float:
     try:
-        if is_missing(value):
+        if value is None or pd.isna(value):
             return float(fallback)
         return float(value)
     except Exception:
         return float(fallback)
 
 
-def pct_delta(latest, prev, key):
-    if prev is None:
-        return None
-
-    current = get_value(latest, key)
-    old = get_value(prev, key)
-
-    if is_missing(current) or is_missing(old):
-        return None
-
-    old = float(old)
-    if old == 0:
-        return None
-
-    return (float(current) - old) / old * 100
-
-
-def row_to_dict(row) -> dict | None:
-    if row is None:
-        return None
-
-    result = {}
-
-    for k, v in row.to_dict().items():
-        if is_missing(v):
-            result[k] = None
-        elif isinstance(v, (int, float)):
-            result[k] = float(v)
-        else:
-            result[k] = v
-
-    return result
-
-
 # ------------------------------------------------------------
 # Solana Logo / Header
 # ------------------------------------------------------------
 
-SOLANA_LOGO_URL = "https://cryptologos.cc/logos/solana-sol-logo.png"
-
 
 def render_header():
-    """Header ohne HTML/CSS, damit Streamlit keinen Code sichtbar rendert."""
-    logo_col, title_col = st.columns([0.07, 0.93])
+    """Stabiler Header ohne HTML, damit kein CSS/Text sichtbar gerendert wird."""
+    logo_col, text_col = st.columns([0.08, 0.92])
 
     with logo_col:
         st.image(SOLANA_LOGO_URL, width=58)
 
-    with title_col:
+    with text_col:
         st.title("Solana Fundamental Monitor")
-        st.caption("Live-Markt, Fundamentaldaten, News und Investmentthese")
+        st.caption(
+            "Live-Markt, Fundamentaldaten, News und Investmentthese – "
+            "persönliches Dashboard für Solana als Finanzinfrastruktur."
+        )
 
 
 @st.cache_data(ttl=30)
 def fetch_live_market_data() -> dict:
     """
     Lädt Live-Marktdaten von CoinGecko.
-    Cache: 30 Sekunden, damit der Kurs fast live bleibt,
+    Der Cache läuft nur 30 Sekunden, damit der Kurs quasi live bleibt,
     ohne die API bei jedem Streamlit-Rerun zu überlasten.
     """
     url = (
@@ -194,6 +149,239 @@ def fetch_live_market_data() -> dict:
         }
 
 
+@st.cache_data(ttl=60)
+def fetch_coinbase_sol_candles(range_label: str = "7 Tage") -> pd.DataFrame:
+    """
+    Lädt SOL/USD-Kerzen von Coinbase Exchange.
+    Die öffentliche Exchange-API liefert Kerzen als:
+    [time, low, high, open, close, volume]
+    """
+    ranges = {
+        "1 Tag": (timedelta(days=1), 300),        # 5-Minuten-Kerzen
+        "7 Tage": (timedelta(days=7), 3600),      # 1-Stunden-Kerzen
+        "30 Tage": (timedelta(days=30), 21600),   # 6-Stunden-Kerzen
+        "90 Tage": (timedelta(days=90), 86400),   # Tageskerzen
+    }
+
+    duration, granularity = ranges.get(range_label, ranges["7 Tage"])
+    end = datetime.now(timezone.utc)
+    start = end - duration
+
+    url = "https://api.exchange.coinbase.com/products/SOL-USD/candles"
+    params = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "granularity": granularity,
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=15,
+            headers={"User-Agent": "solana-fundamental-monitor/2.0"},
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if not isinstance(data, list) or not data:
+            return pd.DataFrame()
+
+        candles = pd.DataFrame(
+            data,
+            columns=["time", "low", "high", "open", "close", "volume"],
+        )
+        candles["time"] = pd.to_datetime(candles["time"], unit="s", utc=True)
+        candles = candles.sort_values("time").reset_index(drop=True)
+
+        for col in ["low", "high", "open", "close", "volume"]:
+            candles[col] = pd.to_numeric(candles[col], errors="coerce")
+
+        return candles.dropna(subset=["time", "close"])
+
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_secret(name: str, fallback: str | None = None) -> str | None:
+    """Liest erst Streamlit Secrets, dann Umgebungsvariablen."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name, fallback)
+
+
+def get_supabase_client():
+    """Erstellt einen Supabase-Client für Login und private Portfolio-Daten."""
+    url = get_secret("SUPABASE_URL")
+    anon_key = (
+        get_secret("SUPABASE_ANON_KEY")
+        or get_secret("SUPABASE_KEY")
+        or get_secret("SUPABASE_PUBLIC_KEY")
+    )
+
+    if create_client is None or not url or not anon_key:
+        return None
+
+    client = create_client(url, anon_key)
+
+    access_token = st.session_state.get("sb_access_token")
+    refresh_token = st.session_state.get("sb_refresh_token")
+
+    if access_token and refresh_token:
+        try:
+            client.auth.set_session(access_token, refresh_token)
+        except Exception:
+            pass
+
+    return client
+
+
+def store_supabase_session(response) -> bool:
+    """Speichert Login-Informationen in der Streamlit-Session."""
+    session = getattr(response, "session", None)
+    user = getattr(response, "user", None)
+
+    if user is None:
+        return False
+
+    st.session_state["sb_user_id"] = getattr(user, "id", None)
+    st.session_state["sb_user_email"] = getattr(user, "email", None)
+
+    if session is not None:
+        st.session_state["sb_access_token"] = getattr(session, "access_token", None)
+        st.session_state["sb_refresh_token"] = getattr(session, "refresh_token", None)
+
+    return True
+
+
+def logout_supabase():
+    for key in [
+        "sb_user_id",
+        "sb_user_email",
+        "sb_access_token",
+        "sb_refresh_token",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def load_user_position(client, user_id: str) -> dict:
+    if client is None or not user_id:
+        return {}
+
+    try:
+        result = (
+            client.table("user_positions")
+            .select("*")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        data = getattr(result, "data", None) or []
+        return data[0] if data else {}
+    except Exception as exc:
+        st.sidebar.warning(f"Position konnte nicht geladen werden: {exc}")
+        return {}
+
+
+def save_user_position(
+    client,
+    user_id: str,
+    email: str | None,
+    jitosol_amount: float,
+    sol_equivalent: float,
+    avg_entry_jitosol: float,
+    historical_sol_entry: float,
+) -> bool:
+    if client is None or not user_id:
+        return False
+
+    payload = {
+        "user_id": user_id,
+        "email": email,
+        "jitosol_amount": float(jitosol_amount),
+        "sol_equivalent": float(sol_equivalent),
+        "avg_entry_jitosol_usd": float(avg_entry_jitosol),
+        "historical_sol_entry_usd": float(historical_sol_entry),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        client.table("user_positions").upsert(payload, on_conflict="user_id").execute()
+        return True
+    except Exception as exc:
+        st.sidebar.error(f"Position konnte nicht gespeichert werden: {exc}")
+        return False
+
+
+def render_auth_area(client):
+    """Login-/Signup-Bereich in der Sidebar."""
+    user_id = st.session_state.get("sb_user_id")
+    user_email = st.session_state.get("sb_user_email")
+
+    if client is None:
+        st.info(
+            "Login ist noch nicht konfiguriert. Hinterlege SUPABASE_URL und "
+            "SUPABASE_ANON_KEY in Streamlit Secrets."
+        )
+        return None, None, False
+
+    if user_id:
+        st.success(f"Eingeloggt als {user_email}")
+        if st.button("Logout"):
+            try:
+                client.auth.sign_out()
+            except Exception:
+                pass
+            logout_supabase()
+            st.rerun()
+        return user_id, user_email, True
+
+    st.subheader("Login")
+
+    auth_mode = st.radio(
+        "Aktion",
+        ["Einloggen", "Konto erstellen"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    email = st.text_input("E-Mail", key="auth_email")
+    password = st.text_input("Passwort", type="password", key="auth_password")
+
+    if st.button(auth_mode):
+        if not email or not password:
+            st.warning("Bitte E-Mail und Passwort eingeben.")
+            return None, None, False
+
+        try:
+            if auth_mode == "Konto erstellen":
+                response = client.auth.sign_up({"email": email, "password": password})
+                if store_supabase_session(response):
+                    st.success("Konto erstellt und eingeloggt.")
+                    st.rerun()
+                else:
+                    st.info(
+                        "Konto erstellt. Bitte prüfe ggf. deine E-Mail zur Bestätigung "
+                        "und logge dich danach ein."
+                    )
+            else:
+                response = client.auth.sign_in_with_password(
+                    {"email": email, "password": password}
+                )
+                if store_supabase_session(response):
+                    st.success("Login erfolgreich.")
+                    st.rerun()
+                else:
+                    st.error("Login fehlgeschlagen.")
+        except Exception as exc:
+            st.error(f"Login fehlgeschlagen: {exc}")
+
+    return None, None, False
+
+
 def build_thesis_commentary(result: dict, latest, live: dict, past_available: bool) -> str:
     """Einfache regelbasierte Tages-Einschätzung ohne externen KI-Key."""
     status = result.get("status", "neutral")
@@ -227,6 +415,36 @@ def build_thesis_commentary(result: dict, latest, live: dict, past_available: bo
         parts.append("Die 30-Tage-Ampel wird aussagekräftiger, sobald mehr tägliche Historie gesammelt wurde.")
 
     return " ".join(parts)
+
+
+def pct_delta(latest, prev, key):
+    if prev is None:
+        return None
+
+    if pd.isna(prev.get(key)) or pd.isna(latest.get(key)):
+        return None
+
+    if float(prev.get(key)) == 0:
+        return None
+
+    return (float(latest.get(key)) - float(prev.get(key))) / float(prev.get(key)) * 100
+
+
+def row_to_dict(row) -> dict | None:
+    if row is None:
+        return None
+
+    result = {}
+
+    for k, v in row.to_dict().items():
+        if pd.isna(v):
+            result[k] = None
+        elif isinstance(v, (int, float)):
+            result[k] = float(v)
+        else:
+            result[k] = v
+
+    return result
 
 
 # ------------------------------------------------------------
@@ -374,10 +592,6 @@ def fetch_news(max_items_per_feed: int = 4) -> list[dict]:
 df = load_history(days=365)
 
 render_header()
-st.caption(
-    "Persönliches Dashboard für die These: Solana als Finanzinfrastruktur "
-    "für Stablecoins, RWA und institutionelle Nutzung."
-)
 
 if df.empty:
     st.warning(
@@ -386,6 +600,7 @@ if df.empty:
     )
     st.stop()
 
+# sicherstellen, dass snapshot_date als Datum erkannt wird
 if "snapshot_date" in df.columns:
     df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
 
@@ -404,16 +619,10 @@ current_dict = row_to_dict(latest)
 past_dict = row_to_dict(past) if past is not None else None
 result = compute_fundamental_score(current_dict, past_dict)
 
-sol_usd = safe_float(latest.get("sol_usd"), 0)
-sol_btc = safe_float(latest.get("sol_btc"), 0)
+sol_usd = float(latest.get("sol_usd") or 0)
+sol_btc = float(latest.get("sol_btc") or 0)
 
-# Neue korrigierte DeFiLlama-Spalten mit Rückwärtskompatibilität.
-app_fees_usd = get_value(latest, "app_fees_usd", "fees_usd")
-app_revenue_usd = get_value(latest, "app_revenue_usd", "revenue_usd")
-chain_fees_usd = get_value(latest, "chain_fees_usd")
-chain_revenue_usd = get_value(latest, "chain_revenue_usd")
-
-# Live-Marktdaten: unabhängig vom täglichen Fundamentaldaten-Snapshot.
+# Live-Marktdaten: unabhängig vom täglichen Fundamentaldaten-Snapshot
 live = fetch_live_market_data()
 sol_usd_live = safe_float(live.get("sol_usd_live"), sol_usd)
 sol_eur_live = live.get("sol_eur_live")
@@ -430,16 +639,23 @@ live_last_update = live.get("last_update")
 
 
 # ------------------------------------------------------------
-# Sidebar: Deine Position
+# Sidebar: Login + Deine Position
 # ------------------------------------------------------------
 
 with st.sidebar:
     st.header("Deine Position")
 
+    supabase_client = get_supabase_client()
+    user_id, user_email, is_logged_in = render_auth_area(supabase_client)
+
+    st.divider()
+
+    position = load_user_position(supabase_client, user_id) if is_logged_in else {}
+
     jitosol_amount = st.number_input(
         "JitoSOL Bestand",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("jitosol_amount"), 0.0),
         step=0.01,
         format="%.5f"
     )
@@ -447,7 +663,7 @@ with st.sidebar:
     sol_equivalent = st.number_input(
         "≈ SOL Gegenwert",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("sol_equivalent"), 0.0),
         step=0.01,
         format="%.2f"
     )
@@ -455,7 +671,7 @@ with st.sidebar:
     avg_entry_jitosol = st.number_input(
         "Ø Einstieg JitoSOL USD",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("avg_entry_jitosol_usd"), 0.0),
         step=0.01,
         format="%.2f"
     )
@@ -463,12 +679,34 @@ with st.sidebar:
     historical_sol_entry = st.number_input(
         "Historischer SOL-Einstieg USD",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("historical_sol_entry_usd"), 0.0),
         step=1.0,
         format="%.2f"
     )
 
-    # JitoSOL-Preis bevorzugt live von CoinGecko; Fallback über SOL/USD × JitoSOL/SOL-Verhältnis.
+    if is_logged_in:
+        if st.button("Position speichern"):
+            ok = save_user_position(
+                supabase_client,
+                user_id,
+                user_email,
+                jitosol_amount,
+                sol_equivalent,
+                avg_entry_jitosol,
+                historical_sol_entry,
+            )
+            if ok:
+                st.success("Position gespeichert.")
+                st.rerun()
+    else:
+        st.caption(
+            "Ohne Login gelten die Werte nur für diese Sitzung. "
+            "Mit Login werden sie privat in Supabase gespeichert."
+        )
+
+    st.divider()
+
+    # JitoSOL-Preis bevorzugt live von CoinGecko; Fallback über SOL/USD × JitoSOL/SOL-Verhältnis
     jitosol_sol_ratio = sol_equivalent / jitosol_amount if jitosol_amount else 0
     if jitosol_usd_live:
         current_jitosol_price = float(jitosol_usd_live)
@@ -579,13 +817,13 @@ with fundamentals:
     )
 
     c.metric(
-        "Stablecoins Mcap",
+        "Stablecoins",
         fmt_usd(latest.get("stablecoins_usd")),
         None if prev is None else f"{pct_delta(latest, prev, 'stablecoins_usd'):+.1f}%"
     )
 
     d.metric(
-        "RWA Active Mcap",
+        "RWA",
         fmt_usd(latest.get("rwa_usd")),
         None if prev is None else f"{pct_delta(latest, prev, 'rwa_usd'):+.1f}%"
     )
@@ -599,47 +837,19 @@ with fundamentals:
     )
 
     f.metric(
-        "App Fees 24h",
-        fmt_usd(app_fees_usd),
-        None if prev is None else f"{pct_delta(latest, prev, 'app_fees_usd'):+.1f}%" if "app_fees_usd" in latest.index else None
+        "Fees 24h",
+        fmt_usd(latest.get("fees_usd")),
+        None if prev is None else f"{pct_delta(latest, prev, 'fees_usd'):+.1f}%"
     )
 
     g.metric(
-        "App Revenue 24h",
-        fmt_usd(app_revenue_usd),
-        None if prev is None else f"{pct_delta(latest, prev, 'app_revenue_usd'):+.1f}%" if "app_revenue_usd" in latest.index else None
+        "Revenue 24h",
+        fmt_usd(latest.get("revenue_usd")),
+        None if prev is None else f"{pct_delta(latest, prev, 'revenue_usd'):+.1f}%"
     )
 
     active = latest.get("active_addresses")
-    h.metric("Active Addresses 24h", "n/a" if is_missing(active) else fmt_num(active, 0))
-
-    i, j, k, l = st.columns(4)
-
-    i.metric(
-        "Chain Fees 24h",
-        fmt_usd(chain_fees_usd),
-        None if prev is None else f"{pct_delta(latest, prev, 'chain_fees_usd'):+.1f}%" if "chain_fees_usd" in latest.index else None
-    )
-
-    j.metric(
-        "Chain Revenue 24h",
-        fmt_usd(chain_revenue_usd),
-        None if prev is None else f"{pct_delta(latest, prev, 'chain_revenue_usd'):+.1f}%" if "chain_revenue_usd" in latest.index else None
-    )
-
-    k.metric("BTC/USD Snapshot", fmt_usd(latest.get("btc_usd")))
-
-    btc_dom = latest.get("btc_dominance")
-    l.metric(
-        "BTC Dominanz",
-        "n/a" if is_missing(btc_dom) else f"{float(btc_dom):.1f}%"
-    )
-
-    st.caption(
-        "Hinweis: Stablecoins, RWA, DEX-Volumen, App Fees/App Revenue und Chain Fees/Chain Revenue "
-        "sind bewusst getrennt, weil DeFiLlama diese Kennzahlen unterschiedlich definiert. "
-        "RWA meint hier die möglichst DeFiLlama-nahe RWA Active Mcap."
-    )
+    h.metric("Active Addresses", "n/a" if pd.isna(active) else fmt_num(active, 0))
 
     st.subheader("30-Tage-Ampel")
 
@@ -707,8 +917,41 @@ with market:
     )
     x4.metric("SOL/BTC", f"{sol_btc:.6f}")
 
+    btc_dom = latest.get("btc_dominance")
+    st.metric(
+        "BTC Dominanz (täglicher Snapshot)",
+        "n/a" if pd.isna(btc_dom) else f"{float(btc_dom):.1f}%"
+    )
+
     if live_last_update:
         st.caption(f"Live-Daten zuletzt abgefragt: {fmt_datetime_utc(live_last_update)}")
+
+    st.divider()
+    st.subheader("SOL/USD Kursverlauf")
+
+    chart_range = st.radio(
+        "Zeitraum",
+        ["1 Tag", "7 Tage", "30 Tage", "90 Tage"],
+        index=1,
+        horizontal=True,
+    )
+
+    candles = fetch_coinbase_sol_candles(chart_range)
+
+    if candles.empty:
+        st.warning("Coinbase-Kursdaten konnten aktuell nicht geladen werden.")
+    else:
+        chart_df = candles.set_index("time")[["close"]].rename(columns={"close": "SOL/USD"})
+        st.line_chart(chart_df, use_container_width=True)
+
+        last_close = safe_float(candles.iloc[-1].get("close"))
+        first_close = safe_float(candles.iloc[0].get("close"))
+        range_change = ((last_close / first_close) - 1) * 100 if first_close else None
+
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("Letzter Coinbase Close", fmt_usd(last_close))
+        cc2.metric("Veränderung im Zeitraum", "n/a" if range_change is None else fmt_pct(range_change))
+        cc3.metric("Kerzen", fmt_num(len(candles), 0))
 
     st.caption(
         "SOL/BTC ist für deine These wichtig: Es zeigt, ob Solana relativ "
@@ -802,38 +1045,26 @@ with news:
 with history:
     st.subheader("Verlauf")
 
-    all_options = {
+    options = {
         "fundamental_score": "Fundamental Score",
-        "sol_usd": "SOL/USD Snapshot",
+        "sol_usd": "SOL/USD",
         "sol_btc": "SOL/BTC",
         "tvl_usd": "TVL USD",
         "tvl_sol": "TVL in SOL",
-        "stablecoins_usd": "Stablecoins Mcap",
-        "rwa_usd": "RWA Active Mcap",
+        "stablecoins_usd": "Stablecoins",
+        "rwa_usd": "RWA",
         "dex_volume_usd": "DEX Volumen",
-        "app_fees_usd": "App Fees 24h",
-        "app_revenue_usd": "App Revenue 24h",
-        "chain_fees_usd": "Chain Fees 24h",
-        "chain_revenue_usd": "Chain Revenue 24h",
-        "active_addresses": "Active Addresses 24h",
-        # Rückwärtskompatibilität für alte CSVs:
-        "fees_usd": "Fees 24h (alt)",
-        "revenue_usd": "Revenue 24h (alt)",
+        "fees_usd": "Fees",
     }
 
-    options = {key: label for key, label in all_options.items() if key in df.columns}
+    choice = st.selectbox(
+        "Kennzahl",
+        list(options),
+        format_func=lambda x: options[x]
+    )
 
-    if not options:
-        st.info("Keine Verlaufsspalten verfügbar.")
-    else:
-        choice = st.selectbox(
-            "Kennzahl",
-            list(options),
-            format_func=lambda x: options[x]
-        )
-
-        chart_df = df.set_index("snapshot_date")[[choice]].dropna()
-        st.line_chart(chart_df)
+    chart_df = df.set_index("snapshot_date")[[choice]].dropna()
+    st.line_chart(chart_df)
 
 
 # ------------------------------------------------------------
