@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -12,7 +13,13 @@ try:
     import plotly.graph_objects as go
 except Exception:
     go = None
+
 from dotenv import load_dotenv
+
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 
 from config import APP_TITLE, WATCHLIST_JSON
 from score import LABELS, WEIGHTS, compute_fundamental_score, interpretation_text, traffic_light
@@ -191,9 +198,10 @@ def fetch_coinbase_candles(product_id: str = "SOL-USD", days: int = 7, granulari
         url = f"https://api.exchange.coinbase.com/products/{product_id}/candles"
         params = {
             "granularity": granularity,
-            "start": _coinbase_iso(cursor.to_pydatetime() if hasattr(cursor, 'to_pydatetime') else cursor),
-            "end": _coinbase_iso(chunk_end.to_pydatetime() if hasattr(chunk_end, 'to_pydatetime') else chunk_end),
+            "start": _coinbase_iso(cursor.to_pydatetime() if hasattr(cursor, "to_pydatetime") else cursor),
+            "end": _coinbase_iso(chunk_end.to_pydatetime() if hasattr(chunk_end, "to_pydatetime") else chunk_end),
         }
+
         try:
             r = requests.get(url, params=params, headers=headers, timeout=15)
             r.raise_for_status()
@@ -201,8 +209,8 @@ def fetch_coinbase_candles(product_id: str = "SOL-USD", days: int = 7, granulari
             if isinstance(data, list):
                 rows.extend(data)
         except Exception:
-            # Einzelne fehlerhafte Blöcke ignorieren, damit die App nicht komplett abstürzt.
             pass
+
         cursor = chunk_end
 
     if not rows:
@@ -211,8 +219,10 @@ def fetch_coinbase_candles(product_id: str = "SOL-USD", days: int = 7, granulari
     df_candles = pd.DataFrame(rows, columns=["timestamp", "low", "high", "open", "close", "volume"])
     df_candles = df_candles.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
     df_candles["time"] = pd.to_datetime(df_candles["timestamp"], unit="s", utc=True)
+
     for col in ["low", "high", "open", "close", "volume"]:
         df_candles[col] = pd.to_numeric(df_candles[col], errors="coerce")
+
     return df_candles[["time", "low", "high", "open", "close", "volume"]].dropna()
 
 
@@ -222,9 +232,9 @@ def render_candlestick_chart(candles: pd.DataFrame, title: str = "SOL/USD Candle
         return
 
     if go is None:
-        st.warning("Plotly ist nicht installiert. Bitte `plotly>=5.24.0` in requirements.txt ergänzen.")
-        fallback = candles.set_index("time")[["close"]]
-        st.line_chart(fallback)
+        st.warning("Plotly ist nicht installiert. Bitte `plotly>=5.24.0` in requirements.txt ergänzen. Fallback: Linienchart.")
+        fallback = candles.set_index("time")[["close"]].rename(columns={"close": "SOL/USD"})
+        st.line_chart(fallback, use_container_width=True)
         return
 
     fig = go.Figure(
@@ -249,6 +259,184 @@ def render_candlestick_chart(candles: pd.DataFrame, title: str = "SOL/USD Candle
     )
     st.plotly_chart(fig, use_container_width=True)
 
+
+def get_secret(name: str, fallback: str | None = None) -> str | None:
+    """Liest erst Streamlit Secrets, dann Umgebungsvariablen."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name, fallback)
+
+
+def get_supabase_client():
+    """Erstellt einen Supabase-Client für Login und private Portfolio-Daten."""
+    url = get_secret("SUPABASE_URL")
+    anon_key = (
+        get_secret("SUPABASE_ANON_KEY")
+        or get_secret("SUPABASE_KEY")
+        or get_secret("SUPABASE_PUBLIC_KEY")
+    )
+
+    if create_client is None or not url or not anon_key:
+        return None
+
+    client = create_client(url, anon_key)
+
+    access_token = st.session_state.get("sb_access_token")
+    refresh_token = st.session_state.get("sb_refresh_token")
+
+    if access_token and refresh_token:
+        try:
+            client.auth.set_session(access_token, refresh_token)
+        except Exception:
+            pass
+
+    return client
+
+
+def store_supabase_session(response) -> bool:
+    """Speichert Login-Informationen in der Streamlit-Session."""
+    session = getattr(response, "session", None)
+    user = getattr(response, "user", None)
+
+    if user is None:
+        return False
+
+    st.session_state["sb_user_id"] = getattr(user, "id", None)
+    st.session_state["sb_user_email"] = getattr(user, "email", None)
+
+    if session is not None:
+        st.session_state["sb_access_token"] = getattr(session, "access_token", None)
+        st.session_state["sb_refresh_token"] = getattr(session, "refresh_token", None)
+
+    return True
+
+
+def logout_supabase():
+    for key in [
+        "sb_user_id",
+        "sb_user_email",
+        "sb_access_token",
+        "sb_refresh_token",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def load_user_position(client, user_id: str) -> dict:
+    if client is None or not user_id:
+        return {}
+
+    try:
+        result = (
+            client.table("user_positions")
+            .select("*")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        data = getattr(result, "data", None) or []
+        return data[0] if data else {}
+    except Exception as exc:
+        st.sidebar.warning(f"Position konnte nicht geladen werden: {exc}")
+        return {}
+
+
+def save_user_position(
+    client,
+    user_id: str,
+    email: str | None,
+    jitosol_amount: float,
+    sol_equivalent: float,
+    avg_entry_jitosol: float,
+    historical_sol_entry: float,
+) -> bool:
+    if client is None or not user_id:
+        return False
+
+    payload = {
+        "user_id": user_id,
+        "email": email,
+        "jitosol_amount": float(jitosol_amount),
+        "sol_equivalent": float(sol_equivalent),
+        "avg_entry_jitosol_usd": float(avg_entry_jitosol),
+        "historical_sol_entry_usd": float(historical_sol_entry),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        client.table("user_positions").upsert(payload, on_conflict="user_id").execute()
+        return True
+    except Exception as exc:
+        st.sidebar.error(f"Position konnte nicht gespeichert werden: {exc}")
+        return False
+
+
+def render_auth_area(client):
+    """Login-/Signup-Bereich in der Sidebar."""
+    user_id = st.session_state.get("sb_user_id")
+    user_email = st.session_state.get("sb_user_email")
+
+    if client is None:
+        st.info(
+            "Login ist noch nicht konfiguriert. Hinterlege SUPABASE_URL und "
+            "SUPABASE_ANON_KEY in Streamlit Secrets."
+        )
+        return None, None, False
+
+    if user_id:
+        st.success(f"Eingeloggt als {user_email}")
+        if st.button("Logout"):
+            try:
+                client.auth.sign_out()
+            except Exception:
+                pass
+            logout_supabase()
+            st.rerun()
+        return user_id, user_email, True
+
+    st.subheader("Login")
+
+    auth_mode = st.radio(
+        "Aktion",
+        ["Einloggen", "Konto erstellen"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    email = st.text_input("E-Mail", key="auth_email")
+    password = st.text_input("Passwort", type="password", key="auth_password")
+
+    if st.button(auth_mode):
+        if not email or not password:
+            st.warning("Bitte E-Mail und Passwort eingeben.")
+            return None, None, False
+
+        try:
+            if auth_mode == "Konto erstellen":
+                response = client.auth.sign_up({"email": email, "password": password})
+                if store_supabase_session(response):
+                    st.success("Konto erstellt und eingeloggt.")
+                    st.rerun()
+                else:
+                    st.info(
+                        "Konto erstellt. Bitte prüfe ggf. deine E-Mail zur Bestätigung "
+                        "und logge dich danach ein."
+                    )
+            else:
+                response = client.auth.sign_in_with_password(
+                    {"email": email, "password": password}
+                )
+                if store_supabase_session(response):
+                    st.success("Login erfolgreich.")
+                    st.rerun()
+                else:
+                    st.error("Login fehlgeschlagen.")
+        except Exception as exc:
+            st.error(f"Login fehlgeschlagen: {exc}")
+
+    return None, None, False
 
 
 def build_thesis_commentary(result: dict, latest, live: dict, past_available: bool) -> str:
@@ -508,32 +696,39 @@ live_last_update = live.get("last_update")
 
 
 # ------------------------------------------------------------
-# Sidebar: Deine Position
+# Sidebar: Login + Deine Position
 # ------------------------------------------------------------
 
 with st.sidebar:
     st.header("Deine Position")
 
+    supabase_client = get_supabase_client()
+    user_id, user_email, is_logged_in = render_auth_area(supabase_client)
+
+    st.divider()
+
+    position = load_user_position(supabase_client, user_id) if is_logged_in else {}
+
     jitosol_amount = st.number_input(
         "JitoSOL Bestand",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("jitosol_amount"), 0.0),
         step=0.01,
         format="%.5f"
     )
 
-    additional_sol = st.number_input(
-        "Zusätzliche SOL (optional)",
+    sol_equivalent = st.number_input(
+        "≈ SOL Gegenwert",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("sol_equivalent"), 0.0),
         step=0.01,
-        format="%.5f"
+        format="%.2f"
     )
 
     avg_entry_jitosol = st.number_input(
         "Ø Einstieg JitoSOL USD",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("avg_entry_jitosol_usd"), 0.0),
         step=0.01,
         format="%.2f"
     )
@@ -541,80 +736,86 @@ with st.sidebar:
     historical_sol_entry = st.number_input(
         "Historischer SOL-Einstieg USD",
         min_value=0.0,
-        value=0.0,
+        value=safe_float(position.get("historical_sol_entry_usd"), 0.0),
         step=1.0,
         format="%.2f"
     )
 
-    entry_jitosol_sol_ratio = st.number_input(
-        "Einstiegs-Umtauschkurs JitoSOL/SOL",
-        min_value=0.0,
-        value=1.0,
-        step=0.0001,
-        format="%.4f",
-        help="Optional: Der JitoSOL/SOL-Umtauschkurs zum Kaufzeitpunkt. Für grobe Staking-Schätzung kann 1,0000 stehen bleiben."
-    )
-
-    # JitoSOL-Umtauschkurs live aus CoinGecko: JitoSOL/USD geteilt durch SOL/USD.
-    if jitosol_usd_live and sol_usd_live:
-        jitosol_sol_ratio_live = float(jitosol_usd_live) / float(sol_usd_live)
+    if is_logged_in:
+        if st.button("Position speichern"):
+            ok = save_user_position(
+                supabase_client,
+                user_id,
+                user_email,
+                jitosol_amount,
+                sol_equivalent,
+                avg_entry_jitosol,
+                historical_sol_entry,
+            )
+            if ok:
+                st.success("Position gespeichert.")
+                st.rerun()
     else:
-        jitosol_sol_ratio_live = 0.0
+        st.caption(
+            "Ohne Login gelten die Werte nur für diese Sitzung. "
+            "Mit Login werden sie privat in Supabase gespeichert."
+        )
 
-    current_jitosol_price_usd = float(jitosol_usd_live) if jitosol_usd_live else jitosol_sol_ratio_live * sol_usd_live
-    current_jitosol_price_eur = float(jitosol_eur_live) if jitosol_eur_live else None
+    st.divider()
 
-    jitosol_value_usd = jitosol_amount * current_jitosol_price_usd
-    jitosol_value_eur = jitosol_amount * current_jitosol_price_eur if current_jitosol_price_eur else None
+    # JitoSOL/SOL-Umtauschkurs:
+    # Bevorzugt live über CoinGecko-Preise; Fallback ist der von dir gespeicherte SOL-Gegenwert.
+    entered_jitosol_sol_ratio = sol_equivalent / jitosol_amount if jitosol_amount else 0.0
+    if jitosol_usd_live and sol_usd_live:
+        jitosol_sol_ratio = float(jitosol_usd_live) / float(sol_usd_live)
+    else:
+        jitosol_sol_ratio = entered_jitosol_sol_ratio
 
-    additional_sol_value_usd = additional_sol * sol_usd_live
-    additional_sol_value_eur = additional_sol * float(sol_eur_live) if sol_eur_live else None
+    current_sol_equivalent = jitosol_amount * jitosol_sol_ratio
 
-    value_now_usd = jitosol_value_usd + additional_sol_value_usd
-    value_now_eur = (jitosol_value_eur or 0) + (additional_sol_value_eur or 0) if (jitosol_value_eur is not None or additional_sol_value_eur is not None) else None
+    if jitosol_usd_live:
+        current_jitosol_price_usd = float(jitosol_usd_live)
+    else:
+        current_jitosol_price_usd = jitosol_sol_ratio * sol_usd_live
+
+    if jitosol_eur_live:
+        current_jitosol_price_eur = float(jitosol_eur_live)
+    elif sol_eur_live:
+        current_jitosol_price_eur = jitosol_sol_ratio * float(sol_eur_live)
+    else:
+        current_jitosol_price_eur = None
+
+    value_now_usd = jitosol_amount * current_jitosol_price_usd
+    value_now_eur = jitosol_amount * current_jitosol_price_eur if current_jitosol_price_eur else None
 
     cost_basis = jitosol_amount * avg_entry_jitosol
     pnl = value_now_usd - cost_basis
     pnl_pct = (value_now_usd / cost_basis - 1) * 100 if cost_basis else 0
 
-    current_sol_equivalent_from_jito = jitosol_amount * jitosol_sol_ratio_live if jitosol_sol_ratio_live else 0.0
-    total_sol_equivalent = current_sol_equivalent_from_jito + additional_sol
+    staking_sol_estimate = max(current_sol_equivalent - jitosol_amount, 0.0)
+    staking_value_usd = staking_sol_estimate * sol_usd_live
+    staking_value_eur = staking_sol_estimate * float(sol_eur_live) if sol_eur_live else None
 
-    # Staking-Zuwachs: JitoSOL akkumuliert Staking über steigenden JitoSOL/SOL-Umtauschkurs.
-    staking_accrued_sol = max(0.0, jitosol_amount * (jitosol_sol_ratio_live - entry_jitosol_sol_ratio)) if jitosol_sol_ratio_live else 0.0
-    staking_accrued_usd = staking_accrued_sol * sol_usd_live
-    staking_accrued_eur = staking_accrued_sol * float(sol_eur_live) if sol_eur_live else None
-
-    st.metric("JitoSOL Preis", fmt_usd(current_jitosol_price_usd))
+    st.metric("Aktueller JitoSOL Preis", fmt_usd(current_jitosol_price_usd))
     if current_jitosol_price_eur:
-        st.caption(f"≈ {current_jitosol_price_eur:.2f} € pro JitoSOL")
-
-    st.metric("JitoSOL/SOL Umtauschkurs", f"{jitosol_sol_ratio_live:.4f}" if jitosol_sol_ratio_live else "n/a")
-    if jitosol_sol_ratio_live:
-        st.caption(f"1 JitoSOL ≈ {jitosol_sol_ratio_live:.4f} SOL · Aufschlag {fmt_pct((jitosol_sol_ratio_live - 1) * 100)}")
+        st.caption(f"≈ {current_jitosol_price_eur:.2f} EUR pro JitoSOL")
+    st.caption(f"1 JitoSOL ≈ {jitosol_sol_ratio:.4f} SOL")
 
     st.metric("Aktueller Wert USD", fmt_usd(value_now_usd))
     st.metric("Aktueller Wert EUR", "n/a" if value_now_eur is None else f"{value_now_eur:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-
-    st.caption(f"{jitosol_amount:.5f} JitoSOL ≈ {current_sol_equivalent_from_jito:.2f} SOL")
-    if additional_sol > 0:
-        st.caption(f"Zusätzlich: {additional_sol:.5f} SOL")
-    st.caption(f"Gesamt ≈ {total_sol_equivalent:.2f} SOL")
+    st.caption(f"{jitosol_amount:.5f} JitoSOL ≈ {current_sol_equivalent:.2f} SOL")
 
     st.metric(
-        "Buchgewinn/-verlust USD",
+        "Buchgewinn/-verlust",
         fmt_usd(pnl),
         delta=f"{pnl_pct:+.1f}%"
     )
 
-    st.divider()
-
-    st.write("**Staking über JitoSOL**")
-    st.metric("Geschätzter Staking-Zuwachs", f"{staking_accrued_sol:.4f} SOL")
-    st.caption(f"≈ {fmt_usd(staking_accrued_usd)}")
-    if staking_accrued_eur is not None:
-        st.caption(f"≈ {staking_accrued_eur:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-    st.caption("Schätzung aus JitoSOL/SOL-Live-Ratio minus deinem eingetragenen Einstiegs-Umtauschkurs.")
+    st.metric("Geschätzter Staking-Zuwachs", f"{staking_sol_estimate:.4f} SOL")
+    st.caption(
+        "≈ " + fmt_usd(staking_value_usd)
+        + (" / " + f"{staking_value_eur:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if staking_value_eur is not None else "")
+    )
 
     st.divider()
 
@@ -784,10 +985,10 @@ with market:
     )
 
     if jitosol_usd_live and sol_usd_live:
-        jitosol_sol_ratio_live_market = float(jitosol_usd_live) / float(sol_usd_live)
-        m4.metric("JitoSOL/SOL", f"{jitosol_sol_ratio_live_market:.4f}", fmt_pct((jitosol_sol_ratio_live_market - 1) * 100))
+        jito_premium = (float(jitosol_usd_live) / float(sol_usd_live) - 1) * 100
+        m4.metric("JitoSOL Premium", fmt_pct(jito_premium))
     else:
-        m4.metric("JitoSOL/SOL", "n/a")
+        m4.metric("JitoSOL Premium", "n/a")
 
     st.divider()
 
@@ -814,32 +1015,40 @@ with market:
     st.divider()
     st.subheader("SOL/USD Candlestick Chart")
 
-    chart_col1, chart_col2 = st.columns([0.5, 0.5])
-    with chart_col1:
-        selected_range = st.selectbox(
-            "Zeitraum",
-            list(COINBASE_RANGE_DAYS.keys()),
-            index=1,
-            help="1 Tag bis 1 Jahr. Die Daten kommen von Coinbase SOL-USD."
-        )
-    with chart_col2:
-        selected_interval = st.selectbox(
-            "Kerzenintervall",
-            list(COINBASE_CANDLE_GRANULARITIES.keys()),
-            index=3,
-            help="Für sehr lange Zeiträume mit 1-Minuten-Kerzen lädt die App viele Datenblöcke."
-        )
-
-    candles = fetch_coinbase_candles(
-        product_id="SOL-USD",
-        days=COINBASE_RANGE_DAYS[selected_range],
-        granularity=COINBASE_CANDLE_GRANULARITIES[selected_interval],
+    chart_range = st.radio(
+        "Zeitraum",
+        ["1 Tag", "7 Tage", "30 Tage", "90 Tage", "1 Jahr"],
+        index=1,
+        horizontal=True,
     )
-    render_candlestick_chart(candles, title=f"SOL/USD · {selected_range} · {selected_interval}")
+
+    chart_granularity_label = st.selectbox(
+        "Kerzenintervall",
+        ["1 Minute", "5 Minuten", "15 Minuten", "1 Stunde", "6 Stunden", "1 Tag"],
+        index=3,
+    )
+
+    days = COINBASE_RANGE_DAYS.get(chart_range, 7)
+    granularity = COINBASE_CANDLE_GRANULARITIES.get(chart_granularity_label, 3600)
+
+    # Coinbase begrenzt die Anzahl Kerzen pro Request. Wir laden deshalb automatisch in Blöcken.
+    candles = fetch_coinbase_candles("SOL-USD", days=days, granularity=granularity)
+    render_candlestick_chart(candles, f"SOL/USD – {chart_range}, Kerzen: {chart_granularity_label}")
+
+    if not candles.empty:
+        last_close = safe_float(candles.iloc[-1].get("close"))
+        first_close = safe_float(candles.iloc[0].get("close"))
+        range_change = ((last_close / first_close) - 1) * 100 if first_close else None
+
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("Letzter Coinbase Close", fmt_usd(last_close))
+        cc2.metric("Veränderung im Zeitraum", "n/a" if range_change is None else fmt_pct(range_change))
+        cc3.metric("Kerzen", fmt_num(len(candles), 0))
 
     st.caption(
-        "Der Chart nutzt Coinbase SOL-USD Candles. JitoSOL wird separat über CoinGecko bewertet, "
-        "weil Coinbase keinen JitoSOL/SOL-Handelsmarkt bereitstellt."
+        "SOL/BTC ist für deine These wichtig: Es zeigt, ob Solana relativ "
+        "zu Bitcoin Stärke aufbaut. Der SOL/USD- und JitoSOL-Kurs oben ist live; "
+        "die Fundamentaldaten darunter kommen aus dem täglichen GitHub-Workflow."
     )
 
 
