@@ -38,6 +38,7 @@ from formatting import safe_float
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 HTML_HEADERS = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
 DEFILLAMA_SOLANA_PAGE_URL = "https://defillama.com/chain/solana"
+DEFILLAMA_SOLANA_RWA_PAGE_URL = "https://defillama.com/rwa/chain/solana"
 
 
 def get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None, retries: int = 2) -> Any | None:
@@ -213,40 +214,55 @@ def _parse_compact_number(value: str | None) -> float | None:
     return number * factor
 
 
-def fetch_defillama_solana_page_metrics() -> dict[str, float | None]:
-    """Best-effort parser for current Solana key metrics displayed on DefiLlama.
-
-    The public JSON APIs do not consistently expose every chain-level UI metric.
-    This parser is deliberately optional: if the page format changes, it returns
-    None values and the rest of the app keeps working.
-    """
+def _fetch_defillama_page_text(url: str) -> str:
     try:
-        response = requests.get(DEFILLAMA_SOLANA_PAGE_URL, headers=HTML_HEADERS, timeout=REQUEST_TIMEOUT)
+        response = requests.get(url, headers=HTML_HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         text = response.text
     except Exception:
-        return {}
-
-    # Turn the rendered/serialized HTML into searchable text while keeping labels close to numbers.
+        return ""
     text = re.sub(r"<[^>]+>", "", text)
     text = unescape(text)
     text = re.sub(r"\s+", " ", text)
+    return text
 
-    patterns = {
-        "rwa_usd": r"RWA\s+Active\s+Mcap\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
-        "chain_fees_usd": r"Chain\s+Fees\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
-        "chain_revenue_usd": r"Chain\s+Revenue\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
-        "active_addresses": r"Active\s+Addresses\s*\(24h\)\s*([0-9.,]+\s*[kmbtKMBT]?)",
-        "transactions_24h": r"Transactions\s*\(24h\)\s*([0-9.,]+\s*[kmbtKMBT]?)",
-        "app_revenue_usd": r"App\s+Revenue\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
-        "app_fees_usd": r"App\s+Fees\s*\(24h\)\s*\$?\s*([0-9.,]+\s*[kmbtKMBT]?)",
-    }
-    out: dict[str, float | None] = {}
-    for key, pattern in patterns.items():
+
+def _extract_metric_from_text(text: str, labels: list[str]) -> float | None:
+    if not text:
+        return None
+    # Supports both "RWA Active Mcap$1.991b" and "Total RWA Active Mcap $1.991b".
+    for label in labels:
+        pattern = re.escape(label).replace(r"\ ", r"\s*") + r"\s*\$?\s*([0-9][0-9.,]*\s*[kmbtKMBT]?)"
         match = re.search(pattern, text, flags=re.IGNORECASE)
-        out[key] = _parse_compact_number(match.group(1)) if match else None
-    return out
+        if match:
+            value = _parse_compact_number(match.group(1))
+            if value is not None:
+                return value
+    return None
 
+
+def fetch_defillama_solana_page_metrics() -> dict[str, float | None]:
+    """Best-effort parser for current Solana metrics displayed on DefiLlama.
+
+    DefiLlama exposes RWA on public pages, while the formal RWA API is not part
+    of the free endpoint list. This reads the public page text and gracefully
+    returns None values if the page layout changes or blocks the request.
+    """
+    chain_text = _fetch_defillama_page_text(DEFILLAMA_SOLANA_PAGE_URL)
+    rwa_text = _fetch_defillama_page_text(DEFILLAMA_SOLANA_RWA_PAGE_URL)
+
+    return {
+        "rwa_usd": _extract_metric_from_text(chain_text, ["RWA Active Mcap"])
+        or _extract_metric_from_text(rwa_text, ["Total RWA Active Mcap", "RWA Active Mcap"]),
+        "rwa_onchain_mcap_usd": _extract_metric_from_text(rwa_text, ["Total RWA Onchain Mcap", "RWA Onchain Mcap"]),
+        "rwa_defi_active_tvl_usd": _extract_metric_from_text(rwa_text, ["DeFi Active TVL"]),
+        "chain_fees_usd": _extract_metric_from_text(chain_text, ["Chain Fees (24h)", "Chain Fees"]),
+        "chain_revenue_usd": _extract_metric_from_text(chain_text, ["Chain Revenue (24h)", "Chain Revenue"]),
+        "active_addresses": _extract_metric_from_text(chain_text, ["Active Addresses (24h)", "Active Addresses"]),
+        "transactions_24h": _extract_metric_from_text(chain_text, ["Transactions (24h)", "Transactions"]),
+        "app_revenue_usd": _extract_metric_from_text(chain_text, ["App Revenue (24h)", "App Revenue"]),
+        "app_fees_usd": _extract_metric_from_text(chain_text, ["App Fees (24h)", "App Fees"]),
+    }
 
 def fetch_current_chain_metrics_scrape_fallback() -> dict[str, Any]:
     metrics = fetch_defillama_solana_page_metrics()

@@ -22,6 +22,7 @@ from data_sources import (
     fetch_coinglass_heatmap,
     fetch_coinbase_candles,
     fetch_live_market,
+    fetch_snapshot,
     summarize_liquidation_levels,
 )
 from formatting import fmt_datetime_utc, fmt_eur, fmt_number, fmt_pct, fmt_usd, is_missing, safe_float
@@ -46,6 +47,44 @@ def render_header() -> None:
 @st.cache_data(ttl=30, show_spinner=False)
 def cached_live_market() -> dict:
     return fetch_live_market()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_current_fundamentals() -> dict:
+    return fetch_snapshot()
+
+
+def merge_missing_current_metrics(latest: dict | None) -> dict | None:
+    """Use live current API data as fallback when the CSV row still has blanks.
+
+    The historical backfill cannot reliably populate every current UI metric
+    (especially RWA and active addresses). This keeps the visible dashboard
+    current while the daily CSV catches up.
+    """
+    if latest is None:
+        return None
+    enriched = dict(latest)
+    try:
+        current = cached_current_fundamentals()
+    except Exception:
+        return enriched
+    fallback_keys = [
+        "rwa_usd",
+        "active_addresses",
+        "transactions_24h",
+        "chain_fees_usd",
+        "chain_revenue_usd",
+        "app_fees_usd",
+        "app_revenue_usd",
+        "dex_volume_usd",
+        "stablecoins_usd",
+        "tvl_usd",
+        "tvl_sol",
+    ]
+    for key in fallback_keys:
+        if is_missing(enriched.get(key)) and not is_missing(current.get(key)):
+            enriched[key] = current.get(key)
+    return enriched
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -101,12 +140,13 @@ def get_latest_context():
         return df, None, None, None, compute_fundamental_score({}, None)
     df["snapshot_date"] = pd.to_datetime(df["snapshot_date"])
     df = df.sort_values("snapshot_date")
-    latest = df.iloc[-1]
+    latest_row = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else None
-    target = latest["snapshot_date"] - pd.Timedelta(days=30)
+    target = latest_row["snapshot_date"] - pd.Timedelta(days=30)
     past_candidates = df[df["snapshot_date"] <= target]
     past = past_candidates.iloc[-1] if not past_candidates.empty else None
-    result = compute_fundamental_score(row_to_dict(latest), row_to_dict(past) if past is not None else None)
+    latest = merge_missing_current_metrics(row_to_dict(latest_row))
+    result = compute_fundamental_score(latest or {}, row_to_dict(past) if past is not None else None)
     return df, latest, prev, past, result
 
 
