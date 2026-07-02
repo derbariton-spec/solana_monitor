@@ -14,6 +14,12 @@ load_dotenv()
 
 
 def _clean(value):
+    """Convert numeric history values safely.
+
+    Older CSV rows also contain text columns such as thesis_status="intakt"
+    and note. Those must not crash the daily fetch when we build the 30-day
+    comparison row. Non-numeric values are simply ignored by returning None.
+    """
     if value is None:
         return None
     try:
@@ -21,13 +27,26 @@ def _clean(value):
             return None
     except Exception:
         pass
-    return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def row_as_dict(row) -> dict | None:
     if row is None:
         return None
-    return {key: _clean(row.get(key)) for key in row.index if key != "snapshot_date"}
+
+    # Only expose numeric columns to the scoring engine. This prevents text
+    # columns like "thesis_status" or "note" from being converted to float.
+    out: dict = {}
+    for key in row.index:
+        if key == "snapshot_date":
+            continue
+        cleaned = _clean(row.get(key))
+        if cleaned is not None:
+            out[key] = cleaned
+    return out
 
 
 def main() -> None:
