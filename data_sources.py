@@ -236,17 +236,113 @@ def fetch_rwa_active_mcap_usd() -> float | None:
     return total if found else None
 
 
+def _coinbase_product_for_coin(coin_id: str) -> str | None:
+    return {"solana": "SOL-USD", "bitcoin": "BTC-USD"}.get(coin_id)
+
+
+def _fetch_coinbase_daily_market_chart(coin_id: str, days: int = 365) -> pd.DataFrame:
+    """Fallback for SOL/BTC daily USD history using Coinbase public candles.
+
+    Coinbase returns at most 300 candles per request, so this function downloads
+    the requested period in chunks.
+    """
+    product_id = _coinbase_product_for_coin(coin_id)
+    if not product_id:
+        return pd.DataFrame()
+
+    url = COINBASE_CANDLES_URL.format(product_id=product_id)
+    end = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    start = end - dt.timedelta(days=days + 5)
+    cursor = start
+    rows: list[dict[str, Any]] = []
+
+    while cursor < end:
+        batch_end = min(cursor + dt.timedelta(days=290), end)
+        data = get_json(
+            url,
+            {
+                "start": cursor.isoformat(),
+                "end": batch_end.isoformat(),
+                "granularity": 86400,
+            },
+        ) or []
+
+        if isinstance(data, list):
+            for candle in data:
+                try:
+                    ts, _low, _high, _open, close, _volume = candle
+                    rows.append(
+                        {
+                            "snapshot_date": dt.datetime.fromtimestamp(
+                                float(ts), tz=dt.timezone.utc
+                            ).date().isoformat(),
+                            coin_id + "_usd": float(close),
+                        }
+                    )
+                except Exception:
+                    continue
+
+        cursor = batch_end + dt.timedelta(seconds=1)
+        time.sleep(0.25)
+
+    if not rows:
+        return pd.DataFrame()
+    return (
+        pd.DataFrame(rows)
+        .sort_values("snapshot_date")
+        .drop_duplicates("snapshot_date", keep="last")
+    )
+
+
 def fetch_coin_market_chart(coin_id: str, days: int = 365) -> pd.DataFrame:
+    """Fetch historical USD prices for a CoinGecko coin id.
+
+    For long public CoinGecko requests we intentionally do not force
+    interval=daily. Some plans reject explicit interval overrides. If CoinGecko
+    returns no usable prices, SOL/BTC fall back to Coinbase daily candles.
+    """
     url = COINGECKO_MARKET_CHART_URL.format(coin_id=coin_id)
-    data = get_json(url, {"vs_currency": "usd", "days": days, "interval": "daily"}) or {}
-    rows = []
-    for item in data.get("prices", []):
-        try:
-            ms, price = item
-            rows.append({"snapshot_date": dt.datetime.fromtimestamp(ms / 1000, tz=dt.timezone.utc).date().isoformat(), coin_id + "_usd": float(price)})
-        except Exception:
-            continue
-    return pd.DataFrame(rows).drop_duplicates("snapshot_date") if rows else pd.DataFrame()
+
+    attempts = [
+        {"vs_currency": "usd", "days": str(days)},
+        {"vs_currency": "usd", "days": "max"},
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for params in attempts:
+        data = get_json(url, params) or {}
+        prices = data.get("prices", []) if isinstance(data, dict) else []
+        if prices:
+            for item in prices:
+                try:
+                    ms, price = item
+                    rows.append(
+                        {
+                            "snapshot_date": dt.datetime.fromtimestamp(
+                                float(ms) / 1000, tz=dt.timezone.utc
+                            ).date().isoformat(),
+                            coin_id + "_usd": float(price),
+                        }
+                    )
+                except Exception:
+                    continue
+            break
+        time.sleep(1)
+
+    if rows:
+        df = (
+            pd.DataFrame(rows)
+            .sort_values("snapshot_date")
+            .drop_duplicates("snapshot_date", keep="last")
+        )
+        # If the response is unexpectedly sparse, prefer the Coinbase fallback
+        # for SOL/BTC so the backfill still produces daily rows.
+        if len(df) >= min(30, max(1, int(days * 0.5))):
+            return df
+        fallback = _fetch_coinbase_daily_market_chart(coin_id, days)
+        return fallback if not fallback.empty else df
+
+    return _fetch_coinbase_daily_market_chart(coin_id, days)
 
 
 def fetch_coinbase_candles(product_id: str = DEFAULT_PRODUCT_ID, days: int = 7, granularity: int = 3600) -> pd.DataFrame:
