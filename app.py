@@ -96,10 +96,10 @@ def inject_ios_pwa_icons() -> None:
   }
 
   const base = window.parent.location.origin;
-  const icon180 = base + '/app/static/apple-touch-icon.png?v=5.3.5';
-  const icon192 = base + '/app/static/app-icon-192.png?v=5.3.5';
-  const icon512 = base + '/app/static/app-icon-512.png?v=5.3.5';
-  const manifest = base + '/app/static/manifest.json?v=5.3.5';
+  const icon180 = base + '/app/static/apple-touch-icon.png?v=5.3.6';
+  const icon192 = base + '/app/static/app-icon-192.png?v=5.3.6';
+  const icon512 = base + '/app/static/app-icon-512.png?v=5.3.6';
+  const manifest = base + '/app/static/manifest.json?v=5.3.6';
 
   upsertLink('link[rel="apple-touch-icon"]', {rel: 'apple-touch-icon', sizes: '180x180', href: icon180});
   upsertLink('link[rel="icon"][sizes="192x192"]', {rel: 'icon', type: 'image/png', sizes: '192x192', href: icon192});
