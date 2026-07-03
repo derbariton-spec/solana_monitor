@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import inspect
 
 import streamlit as st
 
@@ -35,7 +36,22 @@ def sign_out() -> None:
     st.session_state.pop("position_loaded", None)
 
 
-def render_auth_box() -> None:
+def _auth_key_prefix(explicit: str | None = None) -> str:
+    if explicit:
+        return explicit
+    # Streamlit renders all tabs in one run. The auth box can appear in multiple
+    # tabs, so widget keys must be unique per call site. Using the caller line
+    # keeps keys stable across reruns without requiring every call to pass a key.
+    frame = inspect.stack()[2]
+    return f"auth_{PathSafe(frame.filename)}_{frame.lineno}"
+
+
+def PathSafe(value: str) -> str:
+    return ''.join(ch if ch.isalnum() else '_' for ch in value)[-40:]
+
+
+def render_auth_box(key_prefix: str | None = None) -> None:
+    prefix = _auth_key_prefix(key_prefix)
     client = get_supabase_client()
     if client is None:
         st.info("Supabase ist nicht konfiguriert. Portfolio-Daten werden nur lokal in der aktuellen Session genutzt.")
@@ -43,14 +59,14 @@ def render_auth_box() -> None:
     if is_logged_in():
         user = current_user() or {}
         st.success(f"Angemeldet: {user.get('email', 'Nutzer')}")
-        if st.button("Logout"):
+        if st.button("Logout", key=f"{prefix}_logout"):
             sign_out()
             st.rerun()
         return
-    mode = st.radio("Login-Modus", ["Einloggen", "Registrieren"], horizontal=True)
-    email = st.text_input("E-Mail", key="auth_email")
-    password = st.text_input("Passwort", type="password", key="auth_password")
-    if st.button("Anmelden" if mode == "Einloggen" else "Account erstellen"):
+    mode = st.radio("Login-Modus", ["Einloggen", "Registrieren"], horizontal=True, key=f"{prefix}_mode")
+    email = st.text_input("E-Mail", key=f"{prefix}_email")
+    password = st.text_input("Passwort", type="password", key=f"{prefix}_password")
+    if st.button("Anmelden" if mode == "Einloggen" else "Account erstellen", key=f"{prefix}_submit"):
         if not email or not password:
             st.warning("Bitte E-Mail und Passwort eingeben.")
             return
