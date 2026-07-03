@@ -53,6 +53,135 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🟣", layout="wide")
 
 
 # -----------------------------
+# Visual design helpers (v5.3)
+# -----------------------------
+
+def inject_theme_css() -> None:
+    st.markdown(
+        """
+<style>
+:root {
+  --sol-bg-1: #080812;
+  --sol-bg-2: #11111f;
+  --sol-card: rgba(255,255,255,0.055);
+  --sol-card-strong: rgba(255,255,255,0.082);
+  --sol-border: rgba(255,255,255,0.12);
+  --sol-text-muted: rgba(255,255,255,0.68);
+  --sol-green: #14F195;
+  --sol-purple: #9945FF;
+  --sol-blue: #00D4FF;
+  --sol-yellow: #FFD166;
+  --sol-red: #FF5C7A;
+}
+.stApp {
+  background:
+    radial-gradient(circle at 10% 0%, rgba(153,69,255,0.18), transparent 32%),
+    radial-gradient(circle at 90% 10%, rgba(20,241,149,0.12), transparent 30%),
+    linear-gradient(180deg, var(--sol-bg-1), var(--sol-bg-2));
+}
+.block-container { padding-top: 1.25rem; max-width: 1500px; }
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, rgba(16,16,30,0.96), rgba(8,8,18,0.98));
+  border-right: 1px solid var(--sol-border);
+}
+.sol-hero {
+  border: 1px solid var(--sol-border);
+  background: linear-gradient(135deg, rgba(153,69,255,0.18), rgba(20,241,149,0.07)), rgba(255,255,255,0.045);
+  border-radius: 28px;
+  padding: 26px 28px;
+  margin: 0.2rem 0 1.0rem 0;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.35);
+}
+.sol-hero-row { display: flex; gap: 16px; align-items: center; }
+.sol-logo { width: 58px; height: 58px; border-radius: 18px; background: rgba(255,255,255,0.06); padding: 8px; }
+.sol-title { font-size: clamp(2.0rem, 4vw, 3.8rem); font-weight: 900; line-height: 1.0; letter-spacing: -0.06em; margin: 0; }
+.sol-subtitle { color: var(--sol-text-muted); font-size: 1.02rem; margin-top: 8px; }
+.sol-pill {
+  display: inline-block; padding: 5px 10px; border-radius: 999px; font-weight: 800; font-size: 0.78rem;
+  background: rgba(20,241,149,0.12); color: var(--sol-green); border: 1px solid rgba(20,241,149,0.25); margin-left: 8px;
+}
+.sol-card-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin: 12px 0 18px 0; }
+.sol-card {
+  border: 1px solid var(--sol-border); background: var(--sol-card); border-radius: 22px; padding: 18px 18px;
+  min-height: 112px; box-shadow: 0 12px 42px rgba(0,0,0,0.20); backdrop-filter: blur(12px);
+}
+.sol-card:hover { background: var(--sol-card-strong); border-color: rgba(255,255,255,0.18); }
+.sol-card-label { color: var(--sol-text-muted); font-size: 0.86rem; font-weight: 800; letter-spacing: .02em; text-transform: uppercase; }
+.sol-card-value { color: white; font-size: clamp(1.55rem, 2.6vw, 2.35rem); font-weight: 900; margin-top: 8px; letter-spacing: -0.04em; }
+.sol-card-caption { color: var(--sol-text-muted); font-size: .88rem; margin-top: 6px; }
+.sol-card.good { border-color: rgba(20,241,149,0.32); box-shadow: inset 0 0 0 1px rgba(20,241,149,0.06); }
+.sol-card.warn { border-color: rgba(255,209,102,0.32); }
+.sol-card.bad { border-color: rgba(255,92,122,0.34); }
+.sol-card.info { border-color: rgba(0,212,255,0.28); }
+.sol-section-title { font-size: 1.55rem; font-weight: 900; margin: 1.1rem 0 .55rem 0; letter-spacing: -0.03em; }
+.sol-summary-box {
+  border: 1px solid rgba(153,69,255,0.28); background: linear-gradient(135deg, rgba(153,69,255,0.15), rgba(0,212,255,0.05));
+  border-radius: 22px; padding: 18px 20px; margin: 10px 0 16px 0; color: rgba(255,255,255,0.92);
+}
+.sol-badge-good, .sol-badge-warn, .sol-badge-bad, .sol-badge-info {
+  display:inline-block; padding: 4px 10px; border-radius: 999px; font-weight: 850; font-size: .78rem;
+}
+.sol-badge-good { background: rgba(20,241,149,0.14); color: var(--sol-green); border: 1px solid rgba(20,241,149,0.25); }
+.sol-badge-warn { background: rgba(255,209,102,0.14); color: var(--sol-yellow); border: 1px solid rgba(255,209,102,0.25); }
+.sol-badge-bad { background: rgba(255,92,122,0.14); color: var(--sol-red); border: 1px solid rgba(255,92,122,0.25); }
+.sol-badge-info { background: rgba(0,212,255,0.14); color: var(--sol-blue); border: 1px solid rgba(0,212,255,0.25); }
+div[data-testid="stMetric"] {
+  background: rgba(255,255,255,0.055); border: 1px solid var(--sol-border); border-radius: 20px; padding: 14px 16px;
+}
+div[data-testid="stDataFrame"] { border-radius: 18px; overflow: hidden; }
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+  border: 1px solid rgba(255,255,255,0.10); border-radius: 999px; padding: 8px 14px; background: rgba(255,255,255,0.04);
+}
+.stTabs [aria-selected="true"] { background: linear-gradient(90deg, rgba(153,69,255,0.25), rgba(20,241,149,0.14)); }
+@media (max-width: 900px) {
+  .sol-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .sol-hero { padding: 20px 18px; border-radius: 22px; }
+  .sol-logo { width: 46px; height: 46px; border-radius: 14px; }
+}
+@media (max-width: 520px) {
+  .sol-card-grid { grid-template-columns: 1fr; }
+  .sol-title { font-size: 2.1rem; }
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _tone_for_score(score: float | None) -> str:
+    if score is None:
+        return "info"
+    if score >= 70:
+        return "good"
+    if score >= 50:
+        return "warn"
+    return "bad"
+
+
+def _status_tone(status: str | None) -> str:
+    if status == "intakt":
+        return "good"
+    if status == "geschwaecht":
+        return "bad"
+    return "warn"
+
+
+def _card(label: str, value: str, caption: str = "", tone: str = "info") -> str:
+    return f"""
+    <div class="sol-card {tone}">
+      <div class="sol-card-label">{label}</div>
+      <div class="sol-card-value">{value}</div>
+      <div class="sol-card-caption">{caption}</div>
+    </div>
+    """
+
+
+def _badge(text: str, tone: str = "info") -> str:
+    return f'<span class="sol-badge-{tone}">{text}</span>'
+
+
+# -----------------------------
 # Cached data access
 # -----------------------------
 
@@ -190,12 +319,20 @@ def get_portfolio_snapshot(live: dict, mode: str = "public"):
 # -----------------------------
 
 def render_header() -> None:
-    logo_col, text_col = st.columns([0.07, 0.93])
-    with logo_col:
-        st.image(SOLANA_LOGO_URL, width=56)
-    with text_col:
-        st.title("Solana Research Terminal")
-        st.caption(f"Version {APP_VERSION} · Public Mode, Personal Mode, Onboarding, Score-Erklärung, Datenqualität, Wallet/JitoSOL, Szenarien und Market Signals")
+    st.markdown(
+        f"""
+<div class="sol-hero">
+  <div class="sol-hero-row">
+    <img class="sol-logo" src="{SOLANA_LOGO_URL}" />
+    <div>
+      <div class="sol-title">Solana Intelligence Terminal <span class="sol-pill">v{APP_VERSION}</span></div>
+      <div class="sol-subtitle">Thesis Score · Market Signals · Wallet/JitoSOL · Risk · Szenarien · Multi-User Public/Personal Mode</div>
+    </div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def render_refresh_controls() -> None:
@@ -245,23 +382,25 @@ def render_onboarding_notice() -> None:
         st.warning("Profil-Onboarding noch nicht abgeschlossen. Öffne den Tab Profil & Onboarding, um Wallet, Watch-Level und Szenarien sauber einzurichten.")
 
 
-def render_top_metrics(latest, live: dict, result: dict) -> None:
+def render_top_metrics(latest, live: dict, result: dict, portfolio: dict | None = None, mode: str = "public") -> None:
     score = safe_float(result.get("score"), 50)
     status = result.get("status", "neutral")
-    icon = "🟢" if status == "intakt" else "🔴" if status == "geschwaecht" else "🟡"
+    status_label = "These intakt" if status == "intakt" else "These geschwächt" if status == "geschwaecht" else "neutral"
     sol_usd = safe_float(live.get("sol_usd"), safe_float(latest.get("sol_usd") if latest is not None else None))
     sol_eur = live.get("sol_eur")
     sol_24h = live.get("sol_24h_change")
     sol_btc = safe_float(live.get("sol_btc"), safe_float(latest.get("sol_btc") if latest is not None else None))
+    portfolio_eur = None if not portfolio else portfolio.get("total_eur")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Thesis Status", f"{icon} {str(status).capitalize()}")
-    c2.metric("Gesamt Score", f"{score:.0f}/100")
-    c3.metric("SOL/USD Live", f"{sol_usd:.2f} $", None if sol_24h is None else fmt_pct(sol_24h) + " 24h")
-    c4.metric("SOL/EUR Live", "n/a" if sol_eur is None else f"{float(sol_eur):.2f} €")
-    c5.metric("SOL/BTC", f"{sol_btc:.6f}")
+    cards = [
+        _card("Thesis", status_label, interpretation_text(result), _status_tone(status)),
+        _card("Score", f"{score:.0f}/100", "Fundamental + Struktur", _tone_for_score(score)),
+        _card("SOL/USD", f"{sol_usd:.2f} $", (fmt_pct(sol_24h) + " 24h") if sol_24h is not None else "Live", "info"),
+        _card("SOL/EUR", "n/a" if sol_eur is None else f"{float(sol_eur):.2f} €", "für Portfolio-Sicht", "info"),
+        _card("Portfolio" if mode == "personal" else "SOL/BTC", fmt_eur(portfolio_eur) if mode == "personal" and portfolio_eur is not None else f"{sol_btc:.6f}", "Personal Mode" if mode == "personal" else "Relative Stärke", "good" if mode == "personal" else "info"),
+    ]
+    st.markdown('<div class="sol-card-grid">' + "".join(cards) + '</div>', unsafe_allow_html=True)
     st.progress(max(0, min(int(score), 100)) / 100)
-    st.info(interpretation_text(result))
     st.caption(f"Live-Kurs zuletzt abgefragt: {fmt_datetime_utc(live.get('timestamp'))}")
 
 
@@ -270,38 +409,56 @@ def render_top_metrics(latest, live: dict, result: dict) -> None:
 # -----------------------------
 
 def render_overview_tab(df, latest, result, live, wallet_summary) -> None:
-    st.subheader("Tageskommentar")
-    st.write(interpretation_text(result))
+    score = safe_float(result.get("score"), 50)
+    status = result.get("status", "neutral")
+    status_text = "intakt" if status == "intakt" else "geschwächt" if status == "geschwaecht" else "neutral"
+    st.markdown("<div class='sol-section-title'>Heute wichtig</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+<div class="sol-summary-box">
+  <b>Solana-These: {status_text}</b> · Score <b>{score:.0f}/100</b><br/>
+  {interpretation_text(result)}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-    st.subheader("Subscores")
-    sub = pd.DataFrame(compute_subscores(result))
-    st.dataframe(sub, hide_index=True, use_container_width=True)
+    sub_rows = compute_subscores(result)
+    sub_cards = []
+    for row in sub_rows[:6]:
+        val = safe_float(row.get("Score"), 50)
+        sub_cards.append(_card(str(row.get("Bereich", "Score")), f"{val:.0f}/100", str(row.get("Kommentar", "")), _tone_for_score(val)))
+    if sub_cards:
+        st.markdown('<div class="sol-card-grid">' + "".join(sub_cards) + '</div>', unsafe_allow_html=True)
 
     explanation = score_explanation(result)
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown("**Positive Treiber**")
+        st.markdown("### Positive Treiber")
         if explanation["positive"]:
             for line in explanation["positive"]:
                 st.success(line)
         else:
             st.info("Noch keine klaren positiven Treiber.")
     with col2:
-        st.markdown("**Belastungsfaktoren**")
+        st.markdown("### Belastungsfaktoren")
         if explanation["negative"]:
             for line in explanation["negative"]:
                 st.warning(line)
         else:
             st.success("Keine starken negativen Treiber im Score.")
     with col3:
-        st.markdown("**Datenabdeckung**")
+        st.markdown("### Datenabdeckung")
         quality_rows = build_data_quality_rows(latest, df, live, wallet_summary)
         st.write(quality_summary(quality_rows))
         if latest is not None:
             st.caption(f"Letzter Fundamentaldaten-Snapshot: {latest.get('snapshot_date')}")
 
-    st.subheader("These gebrochen?")
+    st.markdown("### These gebrochen?")
     st.dataframe(pd.DataFrame(thesis_break_rules(latest, df, result)), hide_index=True, use_container_width=True)
+
+    with st.expander("Subscores als Tabelle anzeigen"):
+        st.dataframe(pd.DataFrame(sub_rows), hide_index=True, use_container_width=True)
 
 
 def render_market_tab(live: dict) -> None:
@@ -678,13 +835,14 @@ def render_history_tab(df) -> None:
 # -----------------------------
 
 def main() -> None:
+    inject_theme_css()
     render_header()
     render_refresh_controls()
     mode = render_mode_selector()
     df, latest, prev, past, result = get_latest_context()
     live = cached_live_market()
     position, wallet_summary, portfolio = get_portfolio_snapshot(live, mode=mode)
-    render_top_metrics(latest, live, result)
+    render_top_metrics(latest, live, result, portfolio, mode)
     if mode == "personal":
         render_onboarding_notice()
 
