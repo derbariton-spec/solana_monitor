@@ -7,7 +7,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 
-from auth import current_user, is_logged_in, load_user_position, render_auth_box, save_user_position
+from auth import current_user, is_logged_in, load_user_position, render_auth_box, render_logged_in_box, save_user_position
 from charts import render_candlestick_chart, render_line_history
 from config import (
     APP_TITLE,
@@ -474,6 +474,9 @@ def render_mode_selector() -> str:
         with st.sidebar.container():
             st.markdown("### 🔐 Login")
             render_auth_box(key_prefix="sidebar_personal_login")
+    elif is_logged_in():
+        st.sidebar.divider()
+        render_logged_in_box(key_prefix="sidebar_login_status", compact=True)
     return "personal" if mode.startswith("🔐") else "public"
 
 
