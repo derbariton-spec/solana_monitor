@@ -75,3 +75,19 @@ Nach dem Hochladen am besten zuerst `Backfill Solana History` unter GitHub → A
 - RWA und Active Addresses werden best-effort über öffentlich verfügbare Daten geladen. Wenn eine Quelle ihr Format ändert, zeigt das Datenqualitäts-Panel die Einschränkung an.
 - CoinGlass ist optional und benötigt einen API-Key. Ohne Key bleibt der Liquidationen-Tab als Hinweis-/Link-Bereich aktiv.
 - Die Risiko- und Nachkauf-Ampeln sind Entscheidungshilfen und keine Anlageberatung.
+
+## Version 5.1 – Market Signals
+
+Neu hinzugefügt:
+
+- eigener Tab **Market Signals**
+- RSI 14 auf SOL/USD Daily Candles
+- MACD inklusive Bullish/Bearish Cross
+- Bullish/Bearish Engulfing Pattern
+- Funding Rate über Binance Futures Public API als Fallback ohne API-Key
+- Open Interest und 30D-Veränderung über Binance Futures Public API
+- Fear & Greed Index über alternative.me
+- Altcoin Season Index, sofern öffentlicher Endpoint erreichbar; sonst Proxy aus SOL/BTC und BTC-Dominance
+- Timing Score, Technical Score, Derivatives Score und Sentiment Score
+
+Die Signale sind bewusst vom Fundamental Score getrennt. Der Fundamental Score bewertet die Solana-These; der Timing Score bewertet Marktphase, Hebel und Sentiment.

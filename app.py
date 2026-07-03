@@ -24,6 +24,7 @@ from data_sources import (
     summarize_liquidation_levels,
 )
 from formatting import fmt_datetime_utc, fmt_eur, fmt_number, fmt_pct, fmt_usd, is_missing, safe_float
+from market_signals import build_market_signal_report, signal_rows
 from news_fetcher import fetch_news
 from portfolio import PositionSettings, compute_portfolio
 from quality import build_data_quality_rows, quality_summary
@@ -70,6 +71,14 @@ def cached_news() -> list[dict]:
 @st.cache_data(ttl=120, show_spinner=False)
 def cached_coinglass(symbol: str, pair: str, exchange: str, model: str) -> dict:
     return fetch_coinglass_heatmap(symbol=symbol, pair=pair, exchange=exchange, model=model)
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def cached_market_signals(latest_key: str | None = None, past_key: str | None = None) -> dict:
+    # Daily candles keep RSI/MACD stable enough for investment decisions.
+    candles = fetch_coinbase_candles(DEFAULT_PRODUCT_ID, days=180, granularity=86400)
+    # latest_key/past_key only invalidate cache when fundamentals history changes; real dicts are set in caller below.
+    return {"candles": candles}
 
 
 # -----------------------------
@@ -168,7 +177,28 @@ def render_header() -> None:
         st.image(SOLANA_LOGO_URL, width=56)
     with text_col:
         st.title("Solana Research Terminal")
-        st.caption(f"Version {APP_VERSION} · Score-Erklärung, Datenqualität, Subscores, Wallet/JitoSOL, Szenarien, Risiko und Liquidation Levels")
+        st.caption(f"Version {APP_VERSION} · Score-Erklärung, Datenqualität, Subscores, Wallet/JitoSOL, Szenarien, Risiko, Market Signals und Liquidation Levels")
+
+
+def render_refresh_controls() -> None:
+    """Manual refresh button for iPhone/home-screen usage.
+
+    Streamlit caches live market, wallet, news and fundamentals data.
+    On iOS home-screen mode the browser refresh gesture is not always obvious,
+    so this button clears the cache and reruns the app immediately.
+    """
+    left, right = st.columns([0.72, 0.28])
+    with left:
+        last_refresh = st.session_state.get("last_manual_refresh")
+        if last_refresh:
+            st.caption(f"Letzte manuelle Aktualisierung: {last_refresh}")
+        else:
+            st.caption("Live-Daten werden gecacht. Über den Button kannst du alles sofort neu laden.")
+    with right:
+        if st.button("🔄 Werte aktualisieren", use_container_width=True, key="manual_refresh_button"):
+            st.cache_data.clear()
+            st.session_state["last_manual_refresh"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            st.rerun()
 
 
 def render_top_metrics(latest, live: dict, result: dict) -> None:
@@ -251,6 +281,41 @@ def render_market_tab(live: dict) -> None:
     m3.metric("JitoSOL/USD", fmt_usd(live.get("jitosol_usd")), None if live.get("jitosol_24h_change") is None else fmt_pct(live.get("jitosol_24h_change")) + " 24h")
     ratio = safe_float(live.get("jitosol_usd"), 0) / safe_float(live.get("sol_usd"), 1) if live.get("jitosol_usd") and live.get("sol_usd") else None
     m4.metric("JitoSOL/SOL", "n/a" if ratio is None else fmt_number(ratio, 6))
+
+
+def render_market_signals_tab(latest: dict | None, past: dict | None) -> None:
+    st.subheader("📡 Market Signals")
+    st.caption("Timing-/Risiko-Modul: RSI, MACD, Engulfing, Funding Rate, Open Interest, Fear & Greed und Altcoin Season.")
+
+    candles = fetch_coinbase_candles(DEFAULT_PRODUCT_ID, days=180, granularity=86400)
+    report = build_market_signal_report(candles, latest=latest, past=row_to_dict(past) if hasattr(past, "to_dict") else past)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Timing Score", f"{report.get('timing_score', 0):.0f}/100", report.get("label"))
+    c2.metric("Technicals", f"{report.get('technical_score', 0):.0f}/100")
+    c3.metric("Derivatives", f"{report.get('derivatives_score', 0):.0f}/100")
+    c4.metric("Sentiment", f"{report.get('sentiment_score', 0):.0f}/100")
+
+    rows = signal_rows(report)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### Positive Signale")
+        positives = report.get("reasons_positive") or ["Keine klaren positiven Timing-Signale."]
+        for line in positives:
+            st.success(line)
+    with col2:
+        st.markdown("### Risiken")
+        risks = report.get("reasons_risk") or ["Keine starken Timing-Risiken erkannt."]
+        for line in risks:
+            st.warning(line)
+
+    st.markdown("### Lesart")
+    st.write(
+        "Der Timing Score ist kein Kauf-/Verkaufssignal. Er zeigt, ob Marktstruktur, Hebel und Sentiment gerade Rückenwind oder Risiko erzeugen. "
+        "Für langfristige Entscheidungen sollte er neben dem Fundamental Score gelesen werden."
+    )
 
 
 def render_portfolio_tab(live: dict) -> None:
@@ -489,6 +554,7 @@ def render_history_tab(df) -> None:
 
 def main() -> None:
     render_header()
+    render_refresh_controls()
     df, latest, prev, past, result = get_latest_context()
     live = cached_live_market()
     position, wallet_summary, portfolio = get_portfolio_snapshot(live)
@@ -497,6 +563,7 @@ def main() -> None:
     tabs = st.tabs([
         "Übersicht",
         "Markt",
+        "Market Signals",
         "Portfolio",
         "Fundamentals",
         "Datenqualität",
@@ -515,26 +582,28 @@ def main() -> None:
     with tabs[1]:
         render_market_tab(live)
     with tabs[2]:
-        render_portfolio_tab(live)
+        render_market_signals_tab(latest, past)
     with tabs[3]:
-        render_fundamentals_tab(df, latest, prev, result)
+        render_portfolio_tab(live)
     with tabs[4]:
-        render_quality_tab(df, latest, live, wallet_summary)
+        render_fundamentals_tab(df, latest, prev, result)
     with tabs[5]:
-        render_thesis_tab(df, latest, result)
+        render_quality_tab(df, latest, live, wallet_summary)
     with tabs[6]:
-        render_scenario_tab(live, portfolio)
+        render_thesis_tab(df, latest, result)
     with tabs[7]:
-        render_risk_tab(result, live)
+        render_scenario_tab(live, portfolio)
     with tabs[8]:
-        render_weekly_tab(df, result)
+        render_risk_tab(result, live)
     with tabs[9]:
-        render_coinglass_tab(live)
+        render_weekly_tab(df, result)
     with tabs[10]:
-        render_news_tab()
+        render_coinglass_tab(live)
     with tabs[11]:
-        render_history_tab(df)
+        render_news_tab()
     with tabs[12]:
+        render_history_tab(df)
+    with tabs[13]:
         st.subheader("Rohdaten")
         st.dataframe(df.sort_values("snapshot_date", ascending=False) if not df.empty else df, use_container_width=True)
 
