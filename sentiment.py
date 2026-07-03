@@ -15,13 +15,12 @@ HEADERS = {
 }
 
 BINANCE_FEAR_GREED_PAGE = "https://www.binance.com/en/square/fear-and-greed-index"
+ALTERNATIVE_FNG_API = "https://api.alternative.me/fng/"
 COINGLASS_ALTCOIN_SEASON_PAGE = "https://www.coinglass.com/de/pro/i/alt-coin-season"
 ALTCOIN_SEASON_CANDIDATES = [
-    # These are attempted first if CoinGlass exposes a JSON route to the app shell.
     "https://open-api-v4.coinglass.com/api/index/alt-coin-season",
     "https://open-api-v4.coinglass.com/api/indicator/alt-coin-season",
     "https://open-api-v4.coinglass.com/api/index/altcoin-season",
-    # Public fallback candidates used by some dashboards. Optional, not authoritative.
     "https://www.blockchaincenter.net/en/api/altcoin-season-index/",
     "https://api.blockchaincenter.net/altcoin-season-index/",
 ]
@@ -49,31 +48,33 @@ def _get_json(url: str, params: dict[str, Any] | None = None, api_key: str | Non
         return None
 
 
-def _first_number_after(text: str, label_patterns: list[str]) -> float | None:
-    """Find the first plausible 0-100 number near any label pattern."""
+def _number_near_label(text: str, labels: list[str]) -> float | None:
+    """Conservative page parser: accept only a 0-100 number very close to a label.
+
+    This avoids false positives from gauge scales like 0/100 on rendered app shells.
+    """
     normalized = re.sub(r"\s+", " ", text)
-    for label in label_patterns:
-        m = re.search(label, normalized, flags=re.IGNORECASE)
+    for label in labels:
+        # Label then optional punctuation/HTML escapes then number.
+        pattern = rf"{label}.{{0,120}}?([0-9]{{1,3}}(?:[\.,][0-9]+)?)"
+        m = re.search(pattern, normalized, flags=re.IGNORECASE)
         if not m:
             continue
-        window = normalized[m.end():m.end() + 500]
-        nums = re.findall(r"(?<![\d.])([0-9]{1,3}(?:[\.,][0-9]+)?)(?![\d.])", window)
-        for raw in nums:
-            v = safe_float(raw.replace(",", "."), None)
-            if v is not None and 0 <= v <= 100:
-                return v
+        v = safe_float(m.group(1).replace(",", "."), None)
+        if v is not None and 0 <= v <= 100:
+            return v
     return None
 
 
 def _extract_value_from_any_json(data: Any) -> float | None:
     """Walk unknown API shapes and return a plausible 0-100 index value."""
-    keys = {
+    preferred_keys = {
         "altcoin_season_index", "altcoinSeasonIndex", "alt_coin_season", "altCoinSeason",
-        "index", "value", "score", "now", "current", "indicator",
+        "altcoin_index", "altcoinIndex", "season_index", "index", "value", "score", "now", "current", "indicator",
     }
     if isinstance(data, dict):
         for k, v in data.items():
-            if k in keys:
+            if k in preferred_keys:
                 val = safe_float(v, None)
                 if val is not None and 0 <= val <= 100:
                     return val
@@ -82,7 +83,9 @@ def _extract_value_from_any_json(data: Any) -> float | None:
             if found is not None:
                 return found
     elif isinstance(data, list):
-        for item in data[:20]:
+        # Prefer latest/current-ish rows. Many APIs are newest first; try both ends.
+        candidates = data[:5] + data[-5:]
+        for item in candidates:
             found = _extract_value_from_any_json(item)
             if found is not None:
                 return found
@@ -108,21 +111,14 @@ def interpret_fear_greed(value: float | None) -> str:
 
 
 def fetch_fear_greed() -> dict[str, Any]:
-    """Use Binance Square Fear & Greed page as requested.
+    """Primary: Binance Square page. Fallback: Alternative.me public API.
 
-    Binance renders the current index in the public page HTML/app shell. We parse that
-    first. If the page layout changes, the function fails softly instead of crashing.
+    Binance is a rendered web page and is not always machine-readable from Streamlit.
+    The function therefore fails softly and uses Alternative.me instead of returning None.
     """
     r = _get(BINANCE_FEAR_GREED_PAGE)
     if r is not None:
-        text = r.text
-        # Prefer the value close to the page title.
-        value = _first_number_after(text, [r"Crypto Fear\s*&\s*Greed Index", r"Fear\s*&\s*Greed"])
-        if value is None:
-            # Next.js/React pages often embed JSON-like strings. Look for value/classification pairs.
-            m = re.search(r"(?:value|score|index)\D{0,30}([0-9]{1,3})\D{0,50}(Extreme Fear|Fear|Neutral|Greed|Extreme Greed)", text, re.IGNORECASE)
-            if m:
-                value = safe_float(m.group(1), None)
+        value = _number_near_label(r.text, [r"Crypto Fear\s*&\s*Greed Index", r"Fear\s*&\s*Greed Index", r"Fear\s*&\s*Greed"])
         if value is not None:
             return {
                 "ok": True,
@@ -132,6 +128,24 @@ def fetch_fear_greed() -> dict[str, Any]:
                 "source": "Binance Square Fear & Greed",
                 "source_url": BINANCE_FEAR_GREED_PAGE,
             }
+
+    data = _get_json(ALTERNATIVE_FNG_API, {"limit": 1, "format": "json"})
+    try:
+        row = data.get("data", [])[0] if isinstance(data, dict) else None
+        value = safe_float(row.get("value"), None) if isinstance(row, dict) else None
+        label = row.get("value_classification") if isinstance(row, dict) else None
+        if value is not None:
+            return {
+                "ok": True,
+                "value": float(value),
+                "label": label or interpret_fear_greed(float(value)),
+                "timestamp": row.get("timestamp") if isinstance(row, dict) else None,
+                "source": "Alternative.me F&G Fallback (Binance nicht maschinenlesbar)",
+                "source_url": BINANCE_FEAR_GREED_PAGE,
+            }
+    except Exception:
+        pass
+
     return {"ok": False, "value": None, "label": "n/a", "source": "Binance Square Fear & Greed", "source_url": BINANCE_FEAR_GREED_PAGE}
 
 
@@ -148,24 +162,19 @@ def interpret_altcoin_season(value: float | None) -> str:
 
 
 def fetch_altcoin_season_index() -> dict[str, Any]:
-    """Use CoinGlass Altcoin Season page/API candidates as requested.
+    """Primary target: CoinGlass Altcoin Season.
 
-    CoinGlass' public page is a rendered web app. The static HTML sometimes contains no
-    numeric index, so we try the page first, then CoinGlass/open JSON candidates if a
-    COINGLASS_API_KEY exists, and finally return unavailable so the app can use its proxy.
+    Important: we deliberately do NOT parse arbitrary numbers from the CoinGlass HTML.
+    The page contains gauge/scale numbers such as 0 and 100, which caused false 100 readings.
+    We only accept JSON/API data. If unavailable, the app uses its SOL/BTC proxy.
     """
-    r = _get(COINGLASS_ALTCOIN_SEASON_PAGE)
-    if r is not None:
-        value = _first_number_after(r.text, [r"Altcoin[- ]Saison[- ]Index", r"Altcoin Season Index"])
-        if value is not None:
-            return {"ok": True, "value": value, "label": interpret_altcoin_season(value), "source": "CoinGlass Altcoin Season", "source_url": COINGLASS_ALTCOIN_SEASON_PAGE}
-
     api_key = load_runtime_config().coinglass_api_key
     for url in ALTCOIN_SEASON_CANDIDATES:
         data = _get_json(url, api_key=api_key)
         value = _extract_value_from_any_json(data)
         if value is not None:
-            return {"ok": True, "value": value, "label": interpret_altcoin_season(value), "source": "CoinGlass/API Altcoin Season", "source_url": COINGLASS_ALTCOIN_SEASON_PAGE}
+            source = "CoinGlass/API Altcoin Season" if "coinglass" in url else "Blockchaincenter Altcoin Season Fallback"
+            return {"ok": True, "value": value, "label": interpret_altcoin_season(value), "source": source, "source_url": COINGLASS_ALTCOIN_SEASON_PAGE}
 
     return {"ok": False, "value": None, "label": "n/a", "source": "CoinGlass Altcoin Season nicht maschinenlesbar; Proxy aktiv", "source_url": COINGLASS_ALTCOIN_SEASON_PAGE}
 

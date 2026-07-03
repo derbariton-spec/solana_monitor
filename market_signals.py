@@ -15,6 +15,8 @@ BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 BINANCE_PREMIUM_INDEX_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
 BINANCE_OI_URL = "https://fapi.binance.com/fapi/v1/openInterest"
 BINANCE_OI_HIST_URL = "https://fapi.binance.com/futures/data/openInterestHist"
+BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
+BYBIT_OI_HIST_URL = "https://api.bybit.com/v5/market/open-interest"
 COINGLASS_OPEN_INTEREST_PAGE = "https://www.coinglass.com/de/open-interest/SOL"
 
 # CoinGlass API v4 endpoint names have changed in docs over time. Try several
@@ -87,6 +89,35 @@ def fetch_binance_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
     }
 
 
+def fetch_bybit_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
+    data = _get_json(BYBIT_TICKERS_URL, {"category": "linear", "symbol": symbol}) or {}
+    try:
+        rows = data.get("result", {}).get("list", [])
+        first = rows[0] if rows else {}
+        value = safe_float(first.get("fundingRate"), None)
+        return {
+            "ok": value is not None,
+            "symbol": symbol,
+            "funding_rate": value,
+            "funding_rate_pct": None if value is None else value * 100,
+            "avg_funding_rate": None,
+            "avg_funding_rate_pct": None,
+            "source": "Bybit public API (Fallback)",
+        }
+    except Exception:
+        return {"ok": False, "symbol": symbol, "source": "Bybit public API (Fallback)"}
+
+
+def fetch_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
+    b = fetch_binance_funding(symbol)
+    if b.get("ok"):
+        return b
+    y = fetch_bybit_funding(symbol)
+    if y.get("ok"):
+        return y
+    return b
+
+
 def fetch_coinglass_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
     key = load_runtime_config().coinglass_api_key
     if not key:
@@ -138,6 +169,38 @@ def fetch_binance_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
     }
 
 
+def fetch_bybit_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
+    ticker = _get_json(BYBIT_TICKERS_URL, {"category": "linear", "symbol": symbol}) or {}
+    hist = _get_json(BYBIT_OI_HIST_URL, {"category": "linear", "symbol": symbol, "intervalTime": "1d", "limit": 30}) or {}
+    current_oi = None
+    change = None
+    try:
+        rows = ticker.get("result", {}).get("list", [])
+        first_t = rows[0] if rows else {}
+        current_oi = safe_float(first_t.get("openInterest"), None)
+    except Exception:
+        pass
+    try:
+        rows = hist.get("result", {}).get("list", [])
+        if isinstance(rows, list) and len(rows) >= 2:
+            # Bybit usually returns reverse chronological; sort by timestamp if present.
+            rows = sorted(rows, key=lambda x: safe_float(x.get("timestamp"), 0) or 0)
+            first = safe_float(rows[0].get("openInterest"), None)
+            last = safe_float(rows[-1].get("openInterest"), current_oi)
+            if first not in (None, 0) and last is not None:
+                change = (last - first) / first * 100
+    except Exception:
+        pass
+    return {
+        "ok": current_oi is not None or change is not None,
+        "symbol": symbol,
+        "open_interest_contracts": current_oi,
+        "open_interest_30d_pct": change,
+        "source": "Bybit public API (Fallback; CoinGlass-Seite als Referenz)",
+        "source_url": COINGLASS_OPEN_INTEREST_PAGE,
+    }
+
+
 def fetch_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
     cg = fetch_coinglass_open_interest(symbol)
     if cg.get("ok"):
@@ -146,6 +209,10 @@ def fetch_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
     if fallback.get("ok"):
         fallback["coinglass_status"] = cg.get("error")
         return fallback
+    bybit = fetch_bybit_open_interest(symbol)
+    if bybit.get("ok"):
+        bybit["coinglass_status"] = cg.get("error")
+        return bybit
     return cg
 
 
@@ -197,7 +264,7 @@ def derivatives_score(funding: dict[str, Any], oi: dict[str, Any]) -> tuple[floa
 def build_market_signal_report(candles: pd.DataFrame, latest: dict | None = None, past: dict | None = None, symbol: str = "SOLUSDT") -> dict[str, Any]:
     tech = technical_summary(candles)
     tech_score, tech_reasons = technical_score(tech)
-    funding = fetch_binance_funding(symbol)
+    funding = fetch_funding(symbol)
     oi = fetch_open_interest(symbol)
     deriv_score, deriv_reasons = derivatives_score(funding, oi)
     fear = fetch_fear_greed()
