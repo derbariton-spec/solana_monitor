@@ -997,6 +997,14 @@ def render_coinglass_tab(live: dict) -> None:
     st.dataframe(pd.DataFrame(levels), hide_index=True, use_container_width=True)
 
 
+def _news_signal_tone(classification: str) -> str:
+    if "Positiv" in classification:
+        return "good"
+    if "Risiko" in classification:
+        return "bad"
+    return "warn"
+
+
 def render_news_tab() -> None:
     st.subheader("📰 News Radar")
     st.caption("Breiterer News-Feed aus mehreren Solana-Suchclustern: Markt, ETF, RWA, Stablecoins, DeFi, Tech, Reddit.")
@@ -1042,7 +1050,8 @@ def render_news_tab() -> None:
         link = str(item.get("link") or "")
 
         with st.container(border=True):
-            st.markdown(f"### {classification} {title}")
+            st.markdown(_badge(classification, _news_signal_tone(classification)), unsafe_allow_html=True)
+            st.markdown(f"### {title}")
             st.caption(f"{category_name} · {source} · {published}")
             if summary:
                 st.write(summary)
