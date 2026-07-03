@@ -230,7 +230,10 @@ def render_mode_selector() -> str:
         help="Public Mode zeigt allgemeine Solana-Daten. Personal Mode ergänzt Login, Wallet, Watch-Level, Szenarien und Notizen.",
     )
     if mode.startswith("🔐") and not is_logged_in():
-        st.sidebar.info("Für Personal Mode bitte im Tab Profil & Onboarding anmelden.")
+        st.sidebar.info("Personal Mode benötigt Login. Du kannst dich direkt hier anmelden oder im Tab Profil & Onboarding.")
+        with st.sidebar.container():
+            st.markdown("### 🔐 Login")
+            render_auth_box(key_prefix="sidebar_personal_login")
     return "personal" if mode.startswith("🔐") else "public"
 
 
