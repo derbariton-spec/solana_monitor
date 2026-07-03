@@ -216,7 +216,7 @@ def cached_wallet(wallet_address: str) -> dict:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_news() -> list[dict]:
-    return fetch_news(max_items_per_feed=4)
+    return fetch_news(max_items_per_feed=8, max_total=50)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -812,14 +812,56 @@ def render_coinglass_tab(live: dict) -> None:
 
 
 def render_news_tab() -> None:
-    st.subheader("News & Reddit")
-    for item in cached_news():
-        box = st.success if "🟢" in item.get("classification", "") else st.error if "🔴" in item.get("classification", "") else st.info
-        box(f"{item.get('classification')} – {item.get('title')}")
-        st.caption(f"{item.get('source')} · {item.get('published')}")
-        if item.get("link"):
-            st.markdown(f"[Quelle öffnen]({item['link']})")
-        st.divider()
+    st.subheader("📰 News Radar")
+    st.caption("Breiterer News-Feed aus mehreren Solana-Suchclustern: Markt, ETF, RWA, Stablecoins, DeFi, Tech, Reddit.")
+    items = cached_news()
+    if not items:
+        st.info("Aktuell wurden keine News geladen.")
+        return
+
+    cats = sorted({str(i.get("category") or "Allgemein") for i in items})
+    sources = sorted({str(i.get("source") or "Quelle") for i in items})
+    col1, col2, col3, col4 = st.columns([1.15, 1.15, 1.15, 1.55])
+    category = col1.selectbox("Kategorie", ["Alle"] + cats, index=0)
+    sentiment = col2.selectbox("Signal", ["Alle", "🟢 Positiv", "🟡 Neutral", "🔴 Risiko"], index=0)
+    source_filter = col3.selectbox("Quelle", ["Alle"] + sources, index=0)
+    query = col4.text_input("Suche", "")
+
+    filtered = []
+    q = query.strip().lower()
+    for item in items:
+        if category != "Alle" and item.get("category") != category:
+            continue
+        if sentiment != "Alle" and item.get("classification") != sentiment:
+            continue
+        if source_filter != "Alle" and item.get("source") != source_filter:
+            continue
+        if q and q not in f"{item.get('title','')} {item.get('summary','')} {item.get('source','')}".lower():
+            continue
+        filtered.append(item)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Artikel geladen", len(items))
+    c2.metric("Gefiltert", len(filtered))
+    c3.metric("Positiv", sum(1 for i in items if i.get("classification") == "🟢 Positiv"))
+    c4.metric("Risiken", sum(1 for i in items if i.get("classification") == "🔴 Risiko"))
+
+    for item in filtered:
+        title = str(item.get("title") or "Ohne Titel")
+        classification = str(item.get("classification") or "🟡 Neutral")
+        category_name = str(item.get("category") or "Allgemein")
+        source = str(item.get("source") or "")
+        published = str(item.get("published") or "")
+        summary = str(item.get("summary") or "")
+        link = str(item.get("link") or "")
+
+        with st.container(border=True):
+            st.markdown(f"### {classification} {title}")
+            st.caption(f"{category_name} · {source} · {published}")
+            if summary:
+                st.write(summary)
+            if link:
+                st.link_button("Quelle öffnen", link)
 
 
 def render_history_tab(df) -> None:
@@ -862,19 +904,21 @@ def main() -> None:
 
     if mode == "personal":
         tab_names = [
-            "Übersicht", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
-            "These", "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "News", "Historie", "Rohdaten"
+            "Übersicht", "News", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
+            "These", "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
         ]
     else:
         tab_names = [
-            "Übersicht", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
-            "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "News", "Historie", "Rohdaten"
+            "Übersicht", "News", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
+            "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
         ]
     tabs = st.tabs(tab_names)
 
     tab_map = dict(zip(tab_names, tabs))
     with tab_map["Übersicht"]:
         render_overview_tab(df, latest, result, live, wallet_summary)
+    with tab_map["News"]:
+        render_news_tab()
     with tab_map["Markt"]:
         render_market_tab(live)
     with tab_map["Market Signals"]:
@@ -899,8 +943,6 @@ def main() -> None:
         render_weekly_tab(df, result)
     with tab_map["Liquidationen"]:
         render_coinglass_tab(live)
-    with tab_map["News"]:
-        render_news_tab()
     with tab_map["Historie"]:
         render_history_tab(df)
     with tab_map["Rohdaten"]:
