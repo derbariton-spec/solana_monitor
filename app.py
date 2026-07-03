@@ -693,6 +693,72 @@ def render_onboarding_tab(live: dict) -> None:
         st.dataframe(pd.DataFrame(notes), hide_index=True, use_container_width=True)
 
 
+def render_staking_rewards_module(portfolio: dict) -> None:
+    rewards_sol = portfolio.get("staking_rewards_sol")
+    rewards_eur = portfolio.get("staking_rewards_eur")
+    rewards_usd = portfolio.get("staking_rewards_usd")
+    reward_prefix = "+" if safe_float(rewards_sol, 0.0) >= 0 else ""
+
+    st.subheader("JitoSOL Staking Rewards")
+    with st.container(border=True):
+        if rewards_sol is None:
+            st.warning(
+                "Noch keine Rewards-Basis vorhanden. Trage entweder den Phantom-Wert "
+                "'Bought' in SOL oder ein JitoSOL-Kauf-/Startdatum ein."
+            )
+            st.caption(
+                "Formel: aktueller SOL-Gegenwert deiner JitoSOL minus netto eingebrachte SOL. "
+                "Bei Liquid Staking wächst nicht die Token-Anzahl, sondern der JitoSOL/SOL-Kurs."
+            )
+            return
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "Rewards seit Start",
+            f"{reward_prefix}{fmt_number(rewards_sol, 5)} SOL",
+            fmt_eur(rewards_eur),
+        )
+        c2.metric("Reward-Wert USD", fmt_usd(rewards_usd))
+        c3.metric(
+            "Rendite in SOL",
+            fmt_pct(portfolio.get("staking_rewards_pct")),
+            None if portfolio.get("staking_apy") is None else f"APY {fmt_pct(portfolio.get('staking_apy'))}",
+        )
+        c4.metric(
+            "Ø pro Tag",
+            "n/a" if portfolio.get("staking_rewards_per_day_sol") is None else f"{fmt_number(portfolio.get('staking_rewards_per_day_sol'), 5)} SOL",
+            None if portfolio.get("staking_rewards_per_day_eur") is None else fmt_eur(portfolio.get("staking_rewards_per_day_eur")),
+        )
+
+        st.caption(
+            "Phantom-Logik: Holding in SOL minus Bought in SOL. "
+            "Die App nutzt dafür den aktuellen JitoSOL/SOL-Kurs und deine gespeicherte Startbasis."
+        )
+
+        breakdown = [
+            {"Position": "JitoSOL Menge", "Wert": fmt_number(portfolio.get("jitosol_amount"), 5), "Einheit": "JitoSOL"},
+            {"Position": "Bought / Startbasis", "Wert": fmt_number(portfolio.get("staking_basis_sol"), 5), "Einheit": "SOL"},
+            {"Position": "Holding heute", "Wert": fmt_number(portfolio.get("sol_equivalent"), 5), "Einheit": "SOL"},
+            {"Position": "Rewards", "Wert": f"{reward_prefix}{fmt_number(rewards_sol, 5)}", "Einheit": "SOL"},
+            {"Position": "JitoSOL/SOL heute", "Wert": fmt_number(portfolio.get("jitosol_sol_ratio"), 6), "Einheit": "Rate"},
+        ]
+        if portfolio.get("jitosol_sol_ratio_at_start"):
+            breakdown.append({
+                "Position": "JitoSOL/SOL Start",
+                "Wert": fmt_number(portfolio.get("jitosol_sol_ratio_at_start"), 6),
+                "Einheit": "Rate",
+            })
+        if portfolio.get("staking_days"):
+            breakdown.append({"Position": "Tage seit Start", "Wert": fmt_number(portfolio.get("staking_days"), 0), "Einheit": "Tage"})
+        st.dataframe(pd.DataFrame(breakdown), hide_index=True, use_container_width=True)
+
+        if portfolio.get("staking_basis_source"):
+            st.caption(
+                "Berechnungsbasis: "
+                f"{portfolio.get('staking_basis_source')} · Basis {fmt_number(portfolio.get('staking_basis_sol'), 5)} SOL"
+            )
+
+
 def render_portfolio_tab(live: dict) -> None:
     st.subheader("Login & Portfolio")
     render_auth_box()
@@ -748,6 +814,8 @@ def render_portfolio_tab(live: dict) -> None:
     q2.metric("Buchgewinn USD", fmt_usd(portfolio["pnl_usd"]), fmt_pct(portfolio["pnl_pct"]) if portfolio["cost_basis_usd"] else None)
     q3.metric("JitoSOL-Zuwachs SOL", "n/a" if portfolio["staking_rewards_sol"] is None else fmt_number(portfolio["staking_rewards_sol"], 5))
     q4.metric("JitoSOL-Zuwachs EUR", fmt_eur(portfolio["staking_rewards_eur"]))
+
+    render_staking_rewards_module(portfolio)
 
     if portfolio.get("staking_basis_source"):
         st.caption(

@@ -251,13 +251,21 @@ def compute_portfolio(position: PositionSettings, wallet_summary: dict[str, Any]
     rewards_usd = staking_rewards_sol * sol_usd if staking_rewards_sol is not None else None
     rewards_eur = staking_rewards_sol * sol_eur if staking_rewards_sol is not None else None
 
+    staking_days = None
+    staking_rewards_pct = None
+    staking_rewards_per_day_sol = None
+    staking_rewards_per_day_eur = None
     staking_apy = None
-    if staking_rewards_sol is not None and reward_basis_sol and start_date:
+    if staking_rewards_sol is not None and reward_basis_sol:
+        staking_rewards_pct = (staking_rewards_sol / reward_basis_sol) * 100
+    if staking_rewards_sol is not None and start_date:
         try:
-            days = max((dt.date.today() - start_date).days, 1)
-            total_return = staking_rewards_sol / reward_basis_sol
-            if total_return > -0.95:
-                staking_apy = ((1 + total_return) ** (365 / days) - 1) * 100
+            staking_days = max((dt.date.today() - start_date).days, 1)
+            staking_rewards_per_day_sol = staking_rewards_sol / staking_days
+            staking_rewards_per_day_eur = rewards_eur / staking_days if rewards_eur is not None else None
+            total_return = (staking_rewards_sol / reward_basis_sol) if reward_basis_sol else None
+            if total_return is not None and total_return > -0.95:
+                staking_apy = ((1 + total_return) ** (365 / staking_days) - 1) * 100
         except Exception:
             staking_apy = None
 
@@ -282,7 +290,11 @@ def compute_portfolio(position: PositionSettings, wallet_summary: dict[str, Any]
         "manual_basis_difference_sol": manual_basis_difference_sol,
         "staking_reward_warning": reward_warning,
         "staking_rewards_sol": staking_rewards_sol,
+        "staking_rewards_pct": staking_rewards_pct,
         "staking_rewards_usd": rewards_usd,
         "staking_rewards_eur": rewards_eur,
+        "staking_days": staking_days,
+        "staking_rewards_per_day_sol": staking_rewards_per_day_sol,
+        "staking_rewards_per_day_eur": staking_rewards_per_day_eur,
         "staking_apy": staking_apy,
     }
