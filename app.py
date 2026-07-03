@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 
 from auth import current_user, is_logged_in, load_user_position, render_auth_box, save_user_position
@@ -59,6 +60,61 @@ except Exception:
     PAGE_ICON = "🟣"
 
 st.set_page_config(page_title=APP_TITLE, page_icon=PAGE_ICON, layout="wide")
+
+
+
+def inject_ios_pwa_icons() -> None:
+    """Inject Apple touch icon + PWA manifest links into the document head.
+
+    Streamlit's page_icon is not always picked up by iOS when adding the app
+    to the Home Screen. Static serving + explicit apple-touch-icon links are
+    more reliable on Safari/iOS.
+    """
+    components.html(
+        """
+<script>
+(function() {
+  const doc = window.parent.document;
+  const head = doc.head;
+
+  function upsertLink(selector, attrs) {
+    let el = head.querySelector(selector);
+    if (!el) {
+      el = doc.createElement('link');
+      head.appendChild(el);
+    }
+    Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+  }
+
+  function upsertMeta(selector, attrs) {
+    let el = head.querySelector(selector);
+    if (!el) {
+      el = doc.createElement('meta');
+      head.appendChild(el);
+    }
+    Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+  }
+
+  const base = window.parent.location.origin;
+  const icon180 = base + '/app/static/apple-touch-icon.png?v=5.3.5';
+  const icon192 = base + '/app/static/app-icon-192.png?v=5.3.5';
+  const icon512 = base + '/app/static/app-icon-512.png?v=5.3.5';
+  const manifest = base + '/app/static/manifest.json?v=5.3.5';
+
+  upsertLink('link[rel="apple-touch-icon"]', {rel: 'apple-touch-icon', sizes: '180x180', href: icon180});
+  upsertLink('link[rel="icon"][sizes="192x192"]', {rel: 'icon', type: 'image/png', sizes: '192x192', href: icon192});
+  upsertLink('link[rel="icon"][sizes="512x512"]', {rel: 'icon', type: 'image/png', sizes: '512x512', href: icon512});
+  upsertLink('link[rel="manifest"]', {rel: 'manifest', href: manifest});
+
+  upsertMeta('meta[name="apple-mobile-web-app-capable"]', {name: 'apple-mobile-web-app-capable', content: 'yes'});
+  upsertMeta('meta[name="apple-mobile-web-app-title"]', {name: 'apple-mobile-web-app-title', content: 'Solana Terminal'});
+  upsertMeta('meta[name="theme-color"]', {name: 'theme-color', content: '#080812'});
+})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 # -----------------------------
@@ -651,11 +707,22 @@ def render_portfolio_tab(live: dict) -> None:
         with col1:
             manual_jito = st.number_input("Manueller JitoSOL-Bestand (Fallback)", min_value=0.0, value=float(base_position.manual_jitosol_amount), step=0.01, format="%.5f")
             avg_entry = st.number_input("Ø Einstieg JitoSOL USD", min_value=0.0, value=float(base_position.avg_entry_jitosol_usd), step=0.01, format="%.2f")
-            bought_basis = st.number_input("Bought / ursprünglich gestakte SOL-Basis", min_value=0.0, value=float(base_position.bought_sol_basis), step=0.01, format="%.5f")
+            bought_basis = st.number_input(
+                "Phantom Bought / SOL-Basis am Kaufzeitpunkt (optional)",
+                min_value=0.0,
+                value=float(base_position.bought_sol_basis),
+                step=0.01,
+                format="%.5f",
+                help="Trage hier den Phantom-Wert Bought in SOL ein. Wenn ein Staking-Startdatum gesetzt ist, nutzt die App für den JitoSOL-Zuwachs vorrangig den historischen JitoSOL/SOL-Kurs am Startdatum."
+            )
         with col2:
             manual_sol_equiv = st.number_input("Manueller SOL-Gegenwert (Fallback)", min_value=0.0, value=float(base_position.manual_sol_equivalent), step=0.01, format="%.5f")
             hist_sol_entry = st.number_input("Historischer SOL-Einstieg USD", min_value=0.0, value=float(base_position.historical_sol_entry_usd), step=0.01, format="%.2f")
-            staking_start = st.text_input("Staking-Startdatum YYYY-MM-DD (optional)", value=base_position.staking_start_date)
+            staking_start = st.text_input(
+                "JitoSOL-Kauf-/Startdatum YYYY-MM-DD (optional)",
+                value=base_position.staking_start_date,
+                help="Wichtig für die korrekte JitoSOL-Ertragsberechnung. Die App vergleicht dann den heutigen JitoSOL/SOL-Kurs mit dem Kurs an diesem Datum."
+            )
         submitted = st.form_submit_button("Position speichern")
         position = PositionSettings(wallet_address=wallet_address.strip(), manual_jitosol_amount=manual_jito, manual_sol_equivalent=manual_sol_equiv, avg_entry_jitosol_usd=avg_entry, historical_sol_entry_usd=hist_sol_entry, bought_sol_basis=bought_basis, staking_start_date=staking_start.strip())
         if submitted:
@@ -679,15 +746,25 @@ def render_portfolio_tab(live: dict) -> None:
     q1, q2, q3, q4 = st.columns(4)
     q1.metric("JitoSOL/SOL Kurs", fmt_number(portfolio["jitosol_sol_ratio"], 6))
     q2.metric("Buchgewinn USD", fmt_usd(portfolio["pnl_usd"]), fmt_pct(portfolio["pnl_pct"]) if portfolio["cost_basis_usd"] else None)
-    q3.metric("Staking-Ertrag SOL", "n/a" if portfolio["staking_rewards_sol"] is None else fmt_number(portfolio["staking_rewards_sol"], 5))
-    q4.metric("Staking-Ertrag EUR", fmt_eur(portfolio["staking_rewards_eur"]))
+    q3.metric("JitoSOL-Zuwachs SOL", "n/a" if portfolio["staking_rewards_sol"] is None else fmt_number(portfolio["staking_rewards_sol"], 5))
+    q4.metric("JitoSOL-Zuwachs EUR", fmt_eur(portfolio["staking_rewards_eur"]))
+
+    if portfolio.get("staking_basis_source"):
+        st.caption(
+            "Berechnungsbasis für JitoSOL-Zuwachs: "
+            f"{portfolio.get('staking_basis_source')} · Basis: {fmt_number(portfolio.get('staking_basis_sol'), 5)} SOL"
+        )
+    if portfolio.get("jitosol_sol_ratio_at_start"):
+        st.caption(f"JitoSOL/SOL am Startdatum geschätzt: {fmt_number(portfolio.get('jitosol_sol_ratio_at_start'), 6)}")
+    if portfolio.get("staking_reward_warning"):
+        st.warning(portfolio.get("staking_reward_warning"))
 
     st.subheader("Performance-Zerlegung")
     breakdown = [
         {"Baustein": "JitoSOL Wert", "USD": fmt_usd(portfolio["jitosol_value_usd"]), "EUR": fmt_eur(portfolio["jitosol_value_eur"])},
         {"Baustein": "Unstaked SOL", "USD": fmt_usd(portfolio["sol_value_usd"]), "EUR": fmt_eur(portfolio["sol_value_eur"])},
         {"Baustein": "USDC", "USD": fmt_usd(portfolio["usdc_balance"]), "EUR": "n/a"},
-        {"Baustein": "JitoSOL Rewards", "USD": fmt_usd(portfolio["staking_rewards_usd"]), "EUR": fmt_eur(portfolio["staking_rewards_eur"])},
+        {"Baustein": "JitoSOL-Zuwachs", "USD": fmt_usd(portfolio["staking_rewards_usd"]), "EUR": fmt_eur(portfolio["staking_rewards_eur"])},
     ]
     st.dataframe(pd.DataFrame(breakdown), hide_index=True, use_container_width=True)
 
@@ -697,7 +774,7 @@ def render_portfolio_tab(live: dict) -> None:
     elif position.wallet_address:
         st.warning(wallet_summary.get("error", "Wallet konnte nicht gelesen werden."))
     if portfolio.get("staking_apy") is not None:
-        st.metric("Geschätzte annualisierte JitoSOL-Rendite", fmt_pct(portfolio["staking_apy"]))
+        st.metric("Geschätzte annualisierte JitoSOL-Rendite seit Startdatum", fmt_pct(portfolio["staking_apy"]))
 
 
 def render_fundamentals_tab(df, latest, prev, result) -> None:
@@ -930,6 +1007,7 @@ def render_history_tab(df) -> None:
 
 def main() -> None:
     inject_theme_css()
+    inject_ios_pwa_icons()
     render_header()
     render_refresh_controls()
     mode = render_mode_selector()
