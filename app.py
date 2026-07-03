@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+from PIL import Image
 
 from auth import current_user, is_logged_in, load_user_position, render_auth_box, save_user_position
 from charts import render_candlestick_chart, render_line_history
@@ -49,7 +52,13 @@ from storage import load_history
 from thesis import compute_subscores, score_explanation, thesis_break_rules
 from wallet import fetch_wallet_summary
 
-st.set_page_config(page_title=APP_TITLE, page_icon="🟣", layout="wide")
+APP_ICON_PATH = Path(__file__).parent / "assets" / "app-icon.png"
+try:
+    PAGE_ICON = Image.open(APP_ICON_PATH) if APP_ICON_PATH.exists() else "🟣"
+except Exception:
+    PAGE_ICON = "🟣"
+
+st.set_page_config(page_title=APP_TITLE, page_icon=PAGE_ICON, layout="wide")
 
 
 # -----------------------------
@@ -216,7 +225,36 @@ def cached_wallet(wallet_address: str) -> dict:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_news() -> list[dict]:
-    return fetch_news(max_items_per_feed=8, max_total=50)
+    # Compatibility guard: if an older news_fetcher.py is still deployed/cached,
+    # it may not accept the newer keyword arguments yet. The app should not crash
+    # just because the news module is one commit behind.
+    try:
+        return fetch_news(max_items_per_feed=8, max_total=50)
+    except TypeError:
+        try:
+            return fetch_news()
+        except Exception as exc:
+            return [{
+                "source": "System",
+                "title": f"News konnten nicht geladen werden: {exc}",
+                "link": "",
+                "published": "",
+                "published_ts": 0.0,
+                "summary": "",
+                "category": "System",
+                "classification": "🟡 Neutral",
+            }]
+    except Exception as exc:
+        return [{
+            "source": "System",
+            "title": f"News konnten nicht geladen werden: {exc}",
+            "link": "",
+            "published": "",
+            "published_ts": 0.0,
+            "summary": "",
+            "category": "System",
+            "classification": "🟡 Neutral",
+        }]
 
 
 @st.cache_data(ttl=120, show_spinner=False)
