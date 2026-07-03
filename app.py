@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from auth import is_logged_in, load_user_position, render_auth_box, save_user_position
+from auth import current_user, is_logged_in, load_user_position, render_auth_box, save_user_position
 from charts import render_candlestick_chart, render_line_history
 from config import (
     APP_TITLE,
@@ -27,6 +27,19 @@ from formatting import fmt_datetime_utc, fmt_eur, fmt_number, fmt_pct, fmt_usd, 
 from market_signals import build_market_signal_report, signal_rows
 from news_fetcher import fetch_news
 from portfolio import PositionSettings, compute_portfolio
+from user_profile import (
+    ScenarioPreferences,
+    UserProfile,
+    WatchLevels,
+    load_recent_notes,
+    load_scenario_preferences,
+    load_user_profile,
+    load_watch_levels,
+    save_daily_note,
+    save_scenario_preferences,
+    save_user_profile,
+    save_watch_levels,
+)
 from quality import build_data_quality_rows, quality_summary
 from reports import weekly_report_rows
 from risk import build_risk_rows
@@ -160,8 +173,13 @@ def get_latest_context():
     return df, latest, prev, past, result
 
 
-def get_portfolio_snapshot(live: dict):
-    position = load_user_position() if is_logged_in() else PositionSettings()
+def get_portfolio_snapshot(live: dict, mode: str = "public"):
+    if mode != "personal" or not is_logged_in():
+        position = PositionSettings()
+        wallet_summary = {"ok": False, "error": "Public Mode: keine persönliche Wallet geladen."}
+        portfolio = compute_portfolio(position, wallet_summary, live)
+        return position, wallet_summary, portfolio
+    position = load_user_position()
     wallet_summary = cached_wallet(position.wallet_address) if position.wallet_address else {"ok": False, "error": "Keine Wallet hinterlegt."}
     portfolio = compute_portfolio(position, wallet_summary, live)
     return position, wallet_summary, portfolio
@@ -177,7 +195,7 @@ def render_header() -> None:
         st.image(SOLANA_LOGO_URL, width=56)
     with text_col:
         st.title("Solana Research Terminal")
-        st.caption(f"Version {APP_VERSION} · Score-Erklärung, Datenqualität, Subscores, Wallet/JitoSOL, Szenarien, Risiko, Market Signals und Liquidation Levels")
+        st.caption(f"Version {APP_VERSION} · Public Mode, Personal Mode, Onboarding, Score-Erklärung, Datenqualität, Wallet/JitoSOL, Szenarien und Market Signals")
 
 
 def render_refresh_controls() -> None:
@@ -199,6 +217,29 @@ def render_refresh_controls() -> None:
             st.cache_data.clear()
             st.session_state["last_manual_refresh"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             st.rerun()
+
+
+def render_mode_selector() -> str:
+    """Switch between public research view and private portfolio workspace."""
+    st.sidebar.markdown("## Modus")
+    default_idx = 1 if is_logged_in() else 0
+    mode = st.sidebar.radio(
+        "Ansicht",
+        ["🌍 Public Mode", "🔐 Personal Mode"],
+        index=default_idx,
+        help="Public Mode zeigt allgemeine Solana-Daten. Personal Mode ergänzt Login, Wallet, Watch-Level, Szenarien und Notizen.",
+    )
+    if mode.startswith("🔐") and not is_logged_in():
+        st.sidebar.info("Für Personal Mode bitte im Tab Profil & Onboarding anmelden.")
+    return "personal" if mode.startswith("🔐") else "public"
+
+
+def render_onboarding_notice() -> None:
+    if not is_logged_in():
+        return
+    profile = load_user_profile()
+    if not profile.onboarding_completed:
+        st.warning("Profil-Onboarding noch nicht abgeschlossen. Öffne den Tab Profil & Onboarding, um Wallet, Watch-Level und Szenarien sauber einzurichten.")
 
 
 def render_top_metrics(latest, live: dict, result: dict) -> None:
@@ -316,6 +357,72 @@ def render_market_signals_tab(latest: dict | None, past: dict | None) -> None:
         "Der Timing Score ist kein Kauf-/Verkaufssignal. Er zeigt, ob Marktstruktur, Hebel und Sentiment gerade Rückenwind oder Risiko erzeugen. "
         "Für langfristige Entscheidungen sollte er neben dem Fundamental Score gelesen werden."
     )
+
+
+def render_onboarding_tab(live: dict) -> None:
+    st.subheader("🔐 Profil & Onboarding")
+    st.caption("Hier wird aus dem privaten Monitor eine Multi-User-Version: Public Mode für alle, Personal Mode je Login getrennt per Supabase/RLS.")
+    render_auth_box()
+    st.divider()
+
+    if not is_logged_in():
+        st.info("Im Public Mode sind alle allgemeinen Solana-Daten sichtbar. Für Wallet, Watch-Level, Szenarien und Notizen bitte anmelden oder Account erstellen.")
+        st.markdown("""
+**Public Mode enthält:** Fundamentals, Score, Market Signals, News, Liquidationsbereich und Historie.
+
+**Personal Mode ergänzt:** eigene Wallet, JitoSOL-Rewards, Einstandsdaten, Watch-Level, Szenario-Ziele und tägliche Notizen.
+""")
+        return
+
+    user = current_user() or {}
+    profile = load_user_profile()
+    levels = load_watch_levels()
+    prefs = load_scenario_preferences()
+
+    st.success(f"Angemeldet als {user.get('email', 'Nutzer')}")
+
+    with st.form("profile_onboarding_form"):
+        st.markdown("### 1. Profil")
+        display_name = st.text_input("Anzeigename", value=profile.display_name)
+        investor_mode = st.selectbox("Nutzungsmodus", ["Public + Personal", "Nur Personal", "Nur Research"], index=["Public + Personal", "Nur Personal", "Nur Research"].index(profile.investor_mode) if profile.investor_mode in ["Public + Personal", "Nur Personal", "Nur Research"] else 0)
+        risk_profile = st.selectbox("Risikoprofil", ["Konservativ", "Ausgewogen", "Offensiv"], index=["Konservativ", "Ausgewogen", "Offensiv"].index(profile.risk_profile) if profile.risk_profile in ["Konservativ", "Ausgewogen", "Offensiv"] else 1)
+
+        st.markdown("### 2. Watch-Level")
+        c1, c2 = st.columns(2)
+        with c1:
+            accumulation = st.number_input("Akkumulation unter USD", value=float(levels.accumulation_below_usd), min_value=1.0, step=5.0)
+            warning_below = st.number_input("Warnung unter USD", value=float(levels.warning_below_usd), min_value=1.0, step=5.0)
+            target = st.number_input("Langfristziel USD", value=float(levels.long_term_target_usd), min_value=1.0, step=25.0)
+        with c2:
+            hedge = st.number_input("Hedge prüfen über USD", value=float(levels.hedge_check_above_usd), min_value=1.0, step=5.0)
+            profit = st.number_input("Teilgewinn prüfen über USD", value=float(levels.profit_check_above_usd), min_value=1.0, step=25.0)
+
+        st.markdown("### 3. Szenarien")
+        targets = st.text_input("SOL-Zielpreise USD, kommagetrennt", value=prefs.target_prices_csv)
+        apy = st.number_input("JitoSOL APY-Annahme", value=float(prefs.jitosol_apy_assumption), min_value=0.0, max_value=25.0, step=0.1)
+
+        completed = st.checkbox("Onboarding abgeschlossen", value=profile.onboarding_completed)
+        submitted = st.form_submit_button("Profil speichern")
+
+    if submitted:
+        ok1 = save_user_profile(UserProfile(display_name=display_name.strip(), investor_mode=investor_mode, risk_profile=risk_profile, onboarding_completed=completed))
+        ok2 = save_watch_levels(WatchLevels(accumulation_below_usd=accumulation, warning_below_usd=warning_below, hedge_check_above_usd=hedge, profit_check_above_usd=profit, long_term_target_usd=target))
+        ok3 = save_scenario_preferences(ScenarioPreferences(target_prices_csv=targets, jitosol_apy_assumption=apy))
+        if ok1 and ok2 and ok3:
+            st.success("Profil, Watch-Level und Szenarien gespeichert.")
+
+    st.divider()
+    st.markdown("### Tägliche Notiz")
+    today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    note = st.text_area("Markt-/Portfolio-Notiz", placeholder="z. B. Nachkauf geprüft, Hedge geschlossen, SOL/BTC stark, Makro unsicher …")
+    if st.button("Notiz speichern"):
+        if save_daily_note(today, note.strip()):
+            st.success("Notiz gespeichert.")
+
+    notes = load_recent_notes(10)
+    if notes:
+        st.markdown("### Letzte Notizen")
+        st.dataframe(pd.DataFrame(notes), hide_index=True, use_container_width=True)
 
 
 def render_portfolio_tab(live: dict) -> None:
@@ -450,9 +557,12 @@ def render_thesis_tab(df, latest, result) -> None:
 def render_scenario_tab(live: dict, portfolio: dict) -> None:
     st.subheader("Szenario-Rechner")
     st.caption("Berechnet deine SOL/JitoSOL-Exposure in Zielpreis-Szenarien. Es ist eine Modellrechnung, keine Prognose.")
-    default_targets = ", ".join(str(x) for x in DEFAULT_TARGETS)
-    raw = st.text_input("SOL-Zielpreise USD, kommagetrennt", value=default_targets)
-    apy = st.number_input("JitoSOL APY Annahme", min_value=0.0, max_value=20.0, value=6.5, step=0.1)
+    prefs = load_scenario_preferences() if is_logged_in() else ScenarioPreferences(target_prices_csv=", ".join(str(x) for x in DEFAULT_TARGETS), jitosol_apy_assumption=6.5)
+    raw = st.text_input("SOL-Zielpreise USD, kommagetrennt", value=prefs.target_prices_csv)
+    apy = st.number_input("JitoSOL APY Annahme", min_value=0.0, max_value=20.0, value=float(prefs.jitosol_apy_assumption), step=0.1)
+    if is_logged_in() and st.button("Szenario-Vorgaben speichern"):
+        if save_scenario_preferences(ScenarioPreferences(target_prices_csv=raw, jitosol_apy_assumption=apy)):
+            st.success("Szenario-Vorgaben gespeichert.")
     try:
         targets = [float(x.strip()) for x in raw.split(",") if x.strip()]
     except Exception:
@@ -474,12 +584,24 @@ def render_scenario_tab(live: dict, portfolio: dict) -> None:
 
 def render_risk_tab(result: dict, live: dict) -> None:
     st.subheader("Nachkauf- und Hedge-Ampel")
+    levels = load_watch_levels() if is_logged_in() else WatchLevels()
     col1, col2 = st.columns(2)
     with col1:
-        low = st.number_input("Akkumulation unter USD", min_value=1.0, value=150.0, step=5.0)
+        low = st.number_input("Akkumulation unter USD", min_value=1.0, value=float(levels.accumulation_below_usd), step=5.0)
+        warning_below = st.number_input("Warnung unter USD", min_value=1.0, value=float(levels.warning_below_usd), step=5.0)
     with col2:
-        high = st.number_input("Vorsicht über USD", min_value=1.0, value=220.0, step=5.0)
-    st.dataframe(pd.DataFrame(build_risk_rows(result, live, low, high)), hide_index=True, use_container_width=True)
+        high = st.number_input("Hedge prüfen über USD", min_value=1.0, value=float(levels.hedge_check_above_usd), step=5.0)
+        profit_above = st.number_input("Teilgewinn prüfen über USD", min_value=1.0, value=float(levels.profit_check_above_usd), step=25.0)
+    if is_logged_in() and st.button("Watch-Level speichern"):
+        if save_watch_levels(WatchLevels(accumulation_below_usd=low, warning_below_usd=warning_below, hedge_check_above_usd=high, profit_check_above_usd=profit_above, long_term_target_usd=levels.long_term_target_usd)):
+            st.success("Watch-Level gespeichert.")
+    rows = build_risk_rows(result, live, low, high)
+    sol = safe_float(live.get("sol_usd"), 0.0)
+    if sol and sol <= warning_below:
+        rows.insert(0, {"Bereich": "Warnung unten", "Status": "⚠️ unter persönlichem Warnlevel", "Begründung": f"SOL liegt bei {fmt_usd(sol)} und damit unter {fmt_usd(warning_below)}."})
+    if sol and sol >= profit_above:
+        rows.append({"Bereich": "Teilgewinnzone", "Status": "🟡 prüfen", "Begründung": f"SOL liegt über deinem Teilgewinn-Level {fmt_usd(profit_above)}."})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     st.caption("Die Ampel kombiniert Kurszone, Score, kurzfristige Marktbewegung und schwache Kennzahlen. Sie ersetzt keine eigene Entscheidung.")
 
 
@@ -555,55 +677,58 @@ def render_history_tab(df) -> None:
 def main() -> None:
     render_header()
     render_refresh_controls()
+    mode = render_mode_selector()
     df, latest, prev, past, result = get_latest_context()
     live = cached_live_market()
-    position, wallet_summary, portfolio = get_portfolio_snapshot(live)
+    position, wallet_summary, portfolio = get_portfolio_snapshot(live, mode=mode)
     render_top_metrics(latest, live, result)
+    if mode == "personal":
+        render_onboarding_notice()
 
-    tabs = st.tabs([
-        "Übersicht",
-        "Markt",
-        "Market Signals",
-        "Portfolio",
-        "Fundamentals",
-        "Datenqualität",
-        "These",
-        "Szenarien",
-        "Risiko",
-        "Wochenbericht",
-        "Liquidationen",
-        "News",
-        "Historie",
-        "Rohdaten",
-    ])
+    if mode == "personal":
+        tab_names = [
+            "Übersicht", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
+            "These", "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "News", "Historie", "Rohdaten"
+        ]
+    else:
+        tab_names = [
+            "Übersicht", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
+            "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "News", "Historie", "Rohdaten"
+        ]
+    tabs = st.tabs(tab_names)
 
-    with tabs[0]:
+    tab_map = dict(zip(tab_names, tabs))
+    with tab_map["Übersicht"]:
         render_overview_tab(df, latest, result, live, wallet_summary)
-    with tabs[1]:
+    with tab_map["Markt"]:
         render_market_tab(live)
-    with tabs[2]:
+    with tab_map["Market Signals"]:
         render_market_signals_tab(latest, past)
-    with tabs[3]:
-        render_portfolio_tab(live)
-    with tabs[4]:
+    if "Profil & Onboarding" in tab_map:
+        with tab_map["Profil & Onboarding"]:
+            render_onboarding_tab(live)
+    if "Portfolio" in tab_map:
+        with tab_map["Portfolio"]:
+            render_portfolio_tab(live)
+    with tab_map["Fundamentals"]:
         render_fundamentals_tab(df, latest, prev, result)
-    with tabs[5]:
+    with tab_map["Datenqualität"]:
         render_quality_tab(df, latest, live, wallet_summary)
-    with tabs[6]:
+    with tab_map["These"]:
         render_thesis_tab(df, latest, result)
-    with tabs[7]:
+    with tab_map["Szenarien"]:
         render_scenario_tab(live, portfolio)
-    with tabs[8]:
+    with tab_map["Risiko"]:
         render_risk_tab(result, live)
-    with tabs[9]:
+    with tab_map["Wochenbericht"]:
         render_weekly_tab(df, result)
-    with tabs[10]:
+    with tab_map["Liquidationen"]:
         render_coinglass_tab(live)
-    with tabs[11]:
+    with tab_map["News"]:
         render_news_tab()
-    with tabs[12]:
+    with tab_map["Historie"]:
         render_history_tab(df)
-    with tabs[13]:
+    with tab_map["Rohdaten"]:
         st.subheader("Rohdaten")
         st.dataframe(df.sort_values("snapshot_date", ascending=False) if not df.empty else df, use_container_width=True)
 

@@ -10,7 +10,7 @@ except Exception:  # pragma: no cover
     st = None
 
 APP_TITLE = "Solana Research Terminal"
-APP_VERSION = "5.1.0"
+APP_VERSION = "5.2.0"
 SOLANA_LOGO_URL = "https://cryptologos.cc/logos/solana-sol-logo.png"
 DEFAULT_CHAIN = "Solana"
 DEFAULT_PRODUCT_ID = "SOL-USD"
