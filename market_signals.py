@@ -5,25 +5,64 @@ from typing import Any
 import pandas as pd
 import requests
 
-from config import REQUEST_TIMEOUT, USER_AGENT
+from config import COINGLASS_BASE_URL, REQUEST_TIMEOUT, USER_AGENT, load_runtime_config
 from formatting import safe_float
 from sentiment import altcoin_proxy_from_market, fetch_altcoin_season_index, fetch_fear_greed, sentiment_score
 from technicals import technical_score, technical_summary
 
-HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json,text/html"}
 BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 BINANCE_PREMIUM_INDEX_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
 BINANCE_OI_URL = "https://fapi.binance.com/fapi/v1/openInterest"
 BINANCE_OI_HIST_URL = "https://fapi.binance.com/futures/data/openInterestHist"
+COINGLASS_OPEN_INTEREST_PAGE = "https://www.coinglass.com/de/open-interest/SOL"
+
+# CoinGlass API v4 endpoint names have changed in docs over time. Try several
+# defensively; if no API key is present or the plan blocks access, the app falls
+# back to Binance public OI so the dashboard remains usable.
+COINGLASS_OI_ENDPOINT_CANDIDATES = [
+    "/api/futures/open-interest/history",
+    "/api/futures/open-interest/ohlc-history",
+    "/api/futures/openInterest/ohlc-history",
+    "/api/futures/openInterest/history",
+]
 
 
-def _get_json(url: str, params: dict[str, Any] | None = None) -> Any | None:
+def _get_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any | None:
     try:
-        r = requests.get(url, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r = requests.get(url, params=params, headers=headers or HEADERS, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         return r.json()
     except Exception:
         return None
+
+
+def _extract_numeric(data: Any, keys: tuple[str, ...]) -> float | None:
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data:
+                v = safe_float(data.get(key), None)
+                if v is not None:
+                    return v
+        for v in data.values():
+            found = _extract_numeric(v, keys)
+            if found is not None:
+                return found
+    elif isinstance(data, list):
+        # Prefer the latest row when lists are chronological.
+        for item in reversed(data[-20:]):
+            found = _extract_numeric(item, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def _coinglass_headers() -> dict[str, str]:
+    headers = dict(HEADERS)
+    key = load_runtime_config().coinglass_api_key
+    if key:
+        headers["CG-API-KEY"] = key
+    return headers
 
 
 def fetch_binance_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
@@ -48,6 +87,37 @@ def fetch_binance_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
     }
 
 
+def fetch_coinglass_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
+    key = load_runtime_config().coinglass_api_key
+    if not key:
+        return {"ok": False, "source": "CoinGlass Open Interest", "source_url": COINGLASS_OPEN_INTEREST_PAGE, "error": "COINGLASS_API_KEY fehlt"}
+
+    params_candidates = [
+        {"symbol": symbol, "interval": "1d", "limit": 31},
+        {"symbol": "SOL", "interval": "1d", "limit": 31},
+        {"exchange": "Binance", "symbol": symbol, "interval": "1d", "limit": 31},
+        {"exchange": "Binance", "symbol": "SOL", "interval": "1d", "limit": 31},
+    ]
+    headers = _coinglass_headers()
+    for endpoint in COINGLASS_OI_ENDPOINT_CANDIDATES:
+        url = f"{COINGLASS_BASE_URL}{endpoint}"
+        for params in params_candidates:
+            data = _get_json(url, params=params, headers=headers)
+            if data is None:
+                continue
+            current = _extract_numeric(data, ("openInterest", "open_interest", "oi", "close", "sumOpenInterest", "sum_open_interest"))
+            if current is not None:
+                return {
+                    "ok": True,
+                    "symbol": symbol,
+                    "open_interest_contracts": current,
+                    "open_interest_30d_pct": None,
+                    "source": "CoinGlass Open Interest API",
+                    "source_url": COINGLASS_OPEN_INTEREST_PAGE,
+                }
+    return {"ok": False, "source": "CoinGlass Open Interest API", "source_url": COINGLASS_OPEN_INTEREST_PAGE, "error": "keine maschinenlesbaren OI-Daten"}
+
+
 def fetch_binance_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
     cur = _get_json(BINANCE_OI_URL, {"symbol": symbol}) or {}
     hist = _get_json(BINANCE_OI_HIST_URL, {"symbol": symbol, "period": "1d", "limit": 31}) or []
@@ -63,8 +133,20 @@ def fetch_binance_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
         "symbol": symbol,
         "open_interest_contracts": current_oi,
         "open_interest_30d_pct": change,
-        "source": "Binance Futures public API",
+        "source": "Binance Futures public API (Fallback; CoinGlass-Seite als Referenz)",
+        "source_url": COINGLASS_OPEN_INTEREST_PAGE,
     }
+
+
+def fetch_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
+    cg = fetch_coinglass_open_interest(symbol)
+    if cg.get("ok"):
+        return cg
+    fallback = fetch_binance_open_interest(symbol)
+    if fallback.get("ok"):
+        fallback["coinglass_status"] = cg.get("error")
+        return fallback
+    return cg
 
 
 def interpret_funding(funding_pct: float | None) -> str:
@@ -116,7 +198,7 @@ def build_market_signal_report(candles: pd.DataFrame, latest: dict | None = None
     tech = technical_summary(candles)
     tech_score, tech_reasons = technical_score(tech)
     funding = fetch_binance_funding(symbol)
-    oi = fetch_binance_open_interest(symbol)
+    oi = fetch_open_interest(symbol)
     deriv_score, deriv_reasons = derivatives_score(funding, oi)
     fear = fetch_fear_greed()
     altcoin = fetch_altcoin_season_index()
