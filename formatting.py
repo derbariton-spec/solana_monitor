@@ -14,13 +14,19 @@ def is_missing(value: Any) -> bool:
         return value is None
 
 
-def safe_float(value: Any, fallback: float = 0.0) -> float:
+def safe_float(value: Any, fallback: Any = 0.0) -> float | None:
+    """Convert a value to float without crashing on None or API strings.
+
+    Important: some callers intentionally pass fallback=None to mean
+    "missing value". The previous implementation tried float(None), which
+    crashed the app when Binance returned an empty funding value.
+    """
     try:
         if is_missing(value):
-            return float(fallback)
+            return fallback if fallback is None else float(fallback)
         return float(value)
     except Exception:
-        return float(fallback)
+        return fallback if fallback is None else float(fallback)
 
 
 def fmt_number(value: Any, decimals: int = 2) -> str:
