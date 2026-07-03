@@ -111,11 +111,30 @@ def interpret_fear_greed(value: float | None) -> str:
 
 
 def fetch_fear_greed() -> dict[str, Any]:
-    """Primary: Binance Square page. Fallback: Alternative.me public API.
+    """Fear & Greed: use a stable JSON API first; keep Binance as visual reference.
 
-    Binance is a rendered web page and is not always machine-readable from Streamlit.
-    The function therefore fails softly and uses Alternative.me instead of returning None.
+    Binance Square is rendered client-side and often returns no machine-readable index
+    from Streamlit Cloud. Alternative.me provides the same type of 0-100 Crypto
+    Fear & Greed value via JSON, so we use it as the reliable data source.
     """
+    data = _get_json(ALTERNATIVE_FNG_API, {"limit": 1, "format": "json"})
+    try:
+        row = data.get("data", [])[0] if isinstance(data, dict) else None
+        value = safe_float(row.get("value"), None) if isinstance(row, dict) else None
+        label = row.get("value_classification") if isinstance(row, dict) else None
+        if value is not None:
+            return {
+                "ok": True,
+                "value": float(value),
+                "label": label or interpret_fear_greed(float(value)),
+                "timestamp": row.get("timestamp") if isinstance(row, dict) else None,
+                "source": "Alternative.me Fear & Greed (Binance-Seite als Referenz)",
+                "source_url": BINANCE_FEAR_GREED_PAGE,
+            }
+    except Exception:
+        pass
+
+    # Last resort: very conservative Binance page parser.
     r = _get(BINANCE_FEAR_GREED_PAGE)
     if r is not None:
         value = _number_near_label(r.text, [r"Crypto Fear\s*&\s*Greed Index", r"Fear\s*&\s*Greed Index", r"Fear\s*&\s*Greed"])
@@ -128,26 +147,7 @@ def fetch_fear_greed() -> dict[str, Any]:
                 "source": "Binance Square Fear & Greed",
                 "source_url": BINANCE_FEAR_GREED_PAGE,
             }
-
-    data = _get_json(ALTERNATIVE_FNG_API, {"limit": 1, "format": "json"})
-    try:
-        row = data.get("data", [])[0] if isinstance(data, dict) else None
-        value = safe_float(row.get("value"), None) if isinstance(row, dict) else None
-        label = row.get("value_classification") if isinstance(row, dict) else None
-        if value is not None:
-            return {
-                "ok": True,
-                "value": float(value),
-                "label": label or interpret_fear_greed(float(value)),
-                "timestamp": row.get("timestamp") if isinstance(row, dict) else None,
-                "source": "Alternative.me F&G Fallback (Binance nicht maschinenlesbar)",
-                "source_url": BINANCE_FEAR_GREED_PAGE,
-            }
-    except Exception:
-        pass
-
-    return {"ok": False, "value": None, "label": "n/a", "source": "Binance Square Fear & Greed", "source_url": BINANCE_FEAR_GREED_PAGE}
-
+    return {"ok": False, "value": None, "label": "n/a", "source": "Fear & Greed nicht erreichbar", "source_url": BINANCE_FEAR_GREED_PAGE}
 
 def interpret_altcoin_season(value: float | None) -> str:
     if value is None:
@@ -162,22 +162,35 @@ def interpret_altcoin_season(value: float | None) -> str:
 
 
 def fetch_altcoin_season_index() -> dict[str, Any]:
-    """Primary target: CoinGlass Altcoin Season.
+    """Try CoinGlass API only when a key is configured; otherwise force proxy.
 
-    Important: we deliberately do NOT parse arbitrary numbers from the CoinGlass HTML.
-    The page contains gauge/scale numbers such as 0 and 100, which caused false 100 readings.
-    We only accept JSON/API data. If unavailable, the app uses its SOL/BTC proxy.
+    We no longer parse CoinGlass/other HTML or loose JSON endpoints because they
+    often expose gauge-scale numbers (0/100) that are not the current index. This
+    was the source of the false 100.0 reading.
     """
     api_key = load_runtime_config().coinglass_api_key
-    for url in ALTCOIN_SEASON_CANDIDATES:
+    if not api_key:
+        return {
+            "ok": False,
+            "value": None,
+            "label": "Proxy aktiv",
+            "source": "CoinGlass Altcoin Season benötigt API/ist nicht sauber maschinenlesbar",
+            "source_url": COINGLASS_ALTCOIN_SEASON_PAGE,
+        }
+
+    for url in ALTCOIN_SEASON_CANDIDATES[:3]:
         data = _get_json(url, api_key=api_key)
         value = _extract_value_from_any_json(data)
-        if value is not None:
-            source = "CoinGlass/API Altcoin Season" if "coinglass" in url else "Blockchaincenter Altcoin Season Fallback"
-            return {"ok": True, "value": value, "label": interpret_altcoin_season(value), "source": source, "source_url": COINGLASS_ALTCOIN_SEASON_PAGE}
+        if value is not None and 0 <= value <= 100:
+            return {"ok": True, "value": value, "label": interpret_altcoin_season(value), "source": "CoinGlass/API Altcoin Season", "source_url": COINGLASS_ALTCOIN_SEASON_PAGE}
 
-    return {"ok": False, "value": None, "label": "n/a", "source": "CoinGlass Altcoin Season nicht maschinenlesbar; Proxy aktiv", "source_url": COINGLASS_ALTCOIN_SEASON_PAGE}
-
+    return {
+        "ok": False,
+        "value": None,
+        "label": "Proxy aktiv",
+        "source": "CoinGlass Altcoin Season API nicht verfügbar; Proxy aktiv",
+        "source_url": COINGLASS_ALTCOIN_SEASON_PAGE,
+    }
 
 def altcoin_proxy_from_market(latest: dict | None, past: dict | None) -> dict[str, Any]:
     if not latest or not past:

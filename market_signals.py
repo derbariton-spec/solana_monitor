@@ -17,6 +17,8 @@ BINANCE_OI_URL = "https://fapi.binance.com/fapi/v1/openInterest"
 BINANCE_OI_HIST_URL = "https://fapi.binance.com/futures/data/openInterestHist"
 BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
 BYBIT_OI_HIST_URL = "https://api.bybit.com/v5/market/open-interest"
+OKX_FUNDING_URL = "https://www.okx.com/api/v5/public/funding-rate"
+OKX_OPEN_INTEREST_URL = "https://www.okx.com/api/v5/public/open-interest"
 COINGLASS_OPEN_INTEREST_PAGE = "https://www.coinglass.com/de/open-interest/SOL"
 
 # CoinGlass API v4 endpoint names have changed in docs over time. Try several
@@ -108,14 +110,46 @@ def fetch_bybit_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
         return {"ok": False, "symbol": symbol, "source": "Bybit public API (Fallback)"}
 
 
+def _okx_inst_id_from_symbol(symbol: str = "SOLUSDT") -> str:
+    # SOLUSDT -> SOL-USDT-SWAP
+    base = symbol.replace("USDT", "")
+    return f"{base}-USDT-SWAP"
+
+
+def fetch_okx_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
+    data = _get_json(OKX_FUNDING_URL, {"instId": _okx_inst_id_from_symbol(symbol)}) or {}
+    try:
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        first = rows[0] if rows else {}
+        value = safe_float(first.get("fundingRate"), None)
+        return {
+            "ok": value is not None,
+            "symbol": symbol,
+            "funding_rate": value,
+            "funding_rate_pct": None if value is None else value * 100,
+            "avg_funding_rate": None,
+            "avg_funding_rate_pct": None,
+            "source": "OKX public API (Fallback)",
+        }
+    except Exception:
+        return {"ok": False, "symbol": symbol, "source": "OKX public API (Fallback)"}
+
+
 def fetch_funding(symbol: str = "SOLUSDT") -> dict[str, Any]:
-    b = fetch_binance_funding(symbol)
-    if b.get("ok"):
-        return b
-    y = fetch_bybit_funding(symbol)
-    if y.get("ok"):
-        return y
-    return b
+    # Try multiple public endpoints because some Streamlit Cloud regions are blocked by individual exchanges.
+    for fetcher in (fetch_binance_funding, fetch_bybit_funding, fetch_okx_funding):
+        data = fetcher(symbol)
+        if data.get("ok"):
+            return data
+    return {
+        "ok": False,
+        "symbol": symbol,
+        "funding_rate": None,
+        "funding_rate_pct": None,
+        "avg_funding_rate": None,
+        "avg_funding_rate_pct": None,
+        "source": "Funding nicht erreichbar (Binance/Bybit/OKX blockiert oder leer)",
+    }
 
 
 def fetch_coinglass_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
@@ -201,19 +235,43 @@ def fetch_bybit_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
     }
 
 
+def fetch_okx_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
+    data = _get_json(OKX_OPEN_INTEREST_URL, {"instType": "SWAP", "uly": "SOL-USDT"}) or {}
+    current_oi = None
+    try:
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        first = rows[0] if rows else {}
+        # oiCcy is usually the base-asset amount; oi is contracts. Prefer base amount when present.
+        current_oi = safe_float(first.get("oiCcy"), None) or safe_float(first.get("oi"), None)
+    except Exception:
+        pass
+    return {
+        "ok": current_oi is not None,
+        "symbol": symbol,
+        "open_interest_contracts": current_oi,
+        "open_interest_30d_pct": None,
+        "source": "OKX public API (Fallback; CoinGlass-Seite als Referenz)",
+        "source_url": COINGLASS_OPEN_INTEREST_PAGE,
+    }
+
+
 def fetch_open_interest(symbol: str = "SOLUSDT") -> dict[str, Any]:
     cg = fetch_coinglass_open_interest(symbol)
     if cg.get("ok"):
         return cg
-    fallback = fetch_binance_open_interest(symbol)
-    if fallback.get("ok"):
-        fallback["coinglass_status"] = cg.get("error")
-        return fallback
-    bybit = fetch_bybit_open_interest(symbol)
-    if bybit.get("ok"):
-        bybit["coinglass_status"] = cg.get("error")
-        return bybit
-    return cg
+    for fetcher in (fetch_binance_open_interest, fetch_bybit_open_interest, fetch_okx_open_interest):
+        data = fetcher(symbol)
+        if data.get("ok"):
+            data["coinglass_status"] = cg.get("error")
+            return data
+    return {
+        "ok": False,
+        "source": "Open Interest nicht erreichbar (CoinGlass-Key fehlt; Binance/Bybit/OKX leer)",
+        "source_url": COINGLASS_OPEN_INTEREST_PAGE,
+        "error": cg.get("error"),
+        "open_interest_contracts": None,
+        "open_interest_30d_pct": None,
+    }
 
 
 def interpret_funding(funding_pct: float | None) -> str:
@@ -312,7 +370,7 @@ def signal_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
         {"Signal": "MACD", "Wert": None if tech.get("macd_histogram") is None else round(float(tech.get("macd_histogram")), 4), "Interpretation": (tech.get("macd_cross") or {}).get("label"), "Quelle": "Coinbase Daily Candles"},
         {"Signal": "Candlestick", "Wert": "", "Interpretation": (tech.get("engulfing") or {}).get("label"), "Quelle": "Coinbase Daily Candles"},
         {"Signal": "Funding Rate", "Wert": None if funding.get("funding_rate_pct") is None else f"{float(funding.get('funding_rate_pct')):.4f}%", "Interpretation": interpret_funding(funding.get("funding_rate_pct")), "Quelle": funding.get("source")},
-        {"Signal": "Open Interest 30D", "Wert": None if oi.get("open_interest_30d_pct") is None else f"{float(oi.get('open_interest_30d_pct')):.2f}%", "Interpretation": "steigend" if (oi.get("open_interest_30d_pct") or 0) > 5 else "fallend/neutral", "Quelle": oi.get("source")},
+        {"Signal": "Open Interest", "Wert": (None if oi.get("open_interest_30d_pct") is None and oi.get("open_interest_contracts") is None else (f"{float(oi.get('open_interest_30d_pct')):.2f}% 30D" if oi.get("open_interest_30d_pct") is not None else f"{float(oi.get('open_interest_contracts')):,.0f}")), "Interpretation": ("steigend" if (oi.get("open_interest_30d_pct") or 0) > 5 else ("fallend/neutral" if oi.get("open_interest_30d_pct") is not None else ("aktueller Wert, keine 30D-Historie" if oi.get("open_interest_contracts") is not None else "n/a"))), "Quelle": oi.get("source")},
         {"Signal": "Fear & Greed", "Wert": fear.get("value"), "Interpretation": fear.get("label"), "Quelle": fear.get("source")},
         {"Signal": "Altcoin Season", "Wert": None if alt.get("value") is None else round(float(alt.get("value")), 1), "Interpretation": alt.get("label"), "Quelle": alt.get("source")},
     ]
