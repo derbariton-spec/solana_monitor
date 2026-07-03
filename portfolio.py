@@ -42,12 +42,82 @@ class PositionSettings:
 
 
 def _parse_iso_date(value: str | None) -> dt.date | None:
+    """Parse common date formats for the personal JitoSOL start date.
+
+    Accepts ISO (2026-03-26) and common German formats (26.03.2026).
+    Returning None is safer than guessing a wrong date.
+    """
     if not value:
         return None
-    try:
-        return dt.date.fromisoformat(str(value).strip()[:10])
-    except Exception:
+    raw = str(value).strip()
+    if not raw:
         return None
+
+    # First try ISO. Keep the [:10] behavior for values that came from a DB date/datetime.
+    try:
+        return dt.date.fromisoformat(raw[:10])
+    except Exception:
+        pass
+
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return dt.datetime.strptime(raw, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _manual_basis_is_plausible(
+    *,
+    manual_basis_sol: float | None,
+    jitosol_amount: float,
+    current_ratio: float,
+    current_sol_equivalent: float,
+    start_date: dt.date | None,
+) -> tuple[bool, str | None]:
+    """Validate the manually entered SOL basis before showing it as rewards basis.
+
+    A very old/default value such as 200 SOL for 220 JitoSOL would imply that one
+    JitoSOL was worth < 1 SOL at purchase. That is not a credible JitoSOL basis
+    and creates absurd "rewards" such as +83 SOL.
+    """
+    if manual_basis_sol is None or manual_basis_sol <= 0:
+        return False, None
+    if not jitosol_amount or not current_sol_equivalent:
+        return False, "Keine belastbare JitoSOL-Menge für die Prüfung der Basis vorhanden."
+
+    basis_per_jitosol = manual_basis_sol / jitosol_amount
+
+    if basis_per_jitosol < 1.0:
+        return (
+            False,
+            "Die gespeicherte Bought-SOL-Basis wirkt unplausibel: sie entspricht "
+            f"nur {basis_per_jitosol:.4f} SOL pro JitoSOL. Dadurch würde der "
+            "JitoSOL-Zuwachs massiv überschätzt. Bitte den Phantom-Wert 'Bought' "
+            "in SOL eintragen oder ein korrektes Startdatum setzen.",
+        )
+
+    if current_ratio and basis_per_jitosol > current_ratio * 1.03:
+        return (
+            False,
+            "Die gespeicherte Bought-SOL-Basis liegt oberhalb des heutigen "
+            "JitoSOL/SOL-Kurses. Dadurch wäre der Zuwachs negativ oder nicht sinnvoll interpretierbar.",
+        )
+
+    # For recent positions, a very large JitoSOL/SOL gain is usually a stale/default basis.
+    if start_date is not None:
+        days = max((dt.date.today() - start_date).days, 1)
+        if days < 730:
+            implied_gain = (current_sol_equivalent - manual_basis_sol) / manual_basis_sol
+            if implied_gain > 0.15:
+                return (
+                    False,
+                    "Die manuelle Bought-SOL-Basis würde für eine relativ junge Position "
+                    f"einen JitoSOL-Zuwachs von {implied_gain*100:.1f}% ergeben. "
+                    "Das wirkt unplausibel und wird nicht als Rewards-Basis verwendet.",
+                )
+
+    return True, None
 
 
 @lru_cache(maxsize=128)
@@ -161,8 +231,21 @@ def compute_portfolio(position: PositionSettings, wallet_summary: dict[str, Any]
                     "deshalb der historische Startkurs verwendet."
                 )
     elif manual_basis_sol is not None:
-        reward_basis_sol = manual_basis_sol
-        reward_basis_source = "manuelle Bought-SOL-Basis"
+        is_ok, plausibility_warning = _manual_basis_is_plausible(
+            manual_basis_sol=manual_basis_sol,
+            jitosol_amount=jitosol_amount,
+            current_ratio=ratio,
+            current_sol_equivalent=sol_equivalent,
+            start_date=start_date,
+        )
+        if is_ok:
+            reward_basis_sol = manual_basis_sol
+            reward_basis_source = "manuelle Bought-SOL-Basis"
+        else:
+            reward_warning = plausibility_warning or (
+                "Keine plausible Basis für den JitoSOL-Zuwachs gefunden. "
+                "Der Wert wird deshalb nicht angezeigt, statt künstlich überhöht zu werden."
+            )
 
     staking_rewards_sol = sol_equivalent - reward_basis_sol if reward_basis_sol is not None else None
     rewards_usd = staking_rewards_sol * sol_usd if staking_rewards_sol is not None else None
