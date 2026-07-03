@@ -1,0 +1,8 @@
+{
+  "devDependencies": {
+    "vitest": "latest"
+  },
+  "scripts": {
+    "test:jito": "vitest run src/utils/jitoRewards.test.ts"
+  }
+}
