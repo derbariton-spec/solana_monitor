@@ -181,6 +181,15 @@ def _badge(text: str, tone: str = "info") -> str:
     return f'<span class="sol-badge-{tone}">{text}</span>'
 
 
+def render_native_card(label: str, value: str, caption: str = "", tone: str = "info") -> None:
+    """Render a card with native Streamlit elements so HTML is never printed as text."""
+    with st.container(border=True):
+        st.caption(str(label).upper())
+        st.markdown(f"### {value}")
+        if caption:
+            st.caption(str(caption))
+
+
 # -----------------------------
 # Cached data access
 # -----------------------------
@@ -392,14 +401,19 @@ def render_top_metrics(latest, live: dict, result: dict, portfolio: dict | None 
     sol_btc = safe_float(live.get("sol_btc"), safe_float(latest.get("sol_btc") if latest is not None else None))
     portfolio_eur = None if not portfolio else portfolio.get("total_eur")
 
-    cards = [
-        _card("Thesis", status_label, interpretation_text(result), _status_tone(status)),
-        _card("Score", f"{score:.0f}/100", "Fundamental + Struktur", _tone_for_score(score)),
-        _card("SOL/USD", f"{sol_usd:.2f} $", (fmt_pct(sol_24h) + " 24h") if sol_24h is not None else "Live", "info"),
-        _card("SOL/EUR", "n/a" if sol_eur is None else f"{float(sol_eur):.2f} €", "für Portfolio-Sicht", "info"),
-        _card("Portfolio" if mode == "personal" else "SOL/BTC", fmt_eur(portfolio_eur) if mode == "personal" and portfolio_eur is not None else f"{sol_btc:.6f}", "Personal Mode" if mode == "personal" else "Relative Stärke", "good" if mode == "personal" else "info"),
+    card_data = [
+        ("Thesis", status_label, interpretation_text(result), _status_tone(status)),
+        ("Score", f"{score:.0f}/100", "Fundamental + Struktur", _tone_for_score(score)),
+        ("SOL/USD", f"{sol_usd:.2f} $", (fmt_pct(sol_24h) + " 24h") if sol_24h is not None else "Live", "info"),
+        ("SOL/EUR", "n/a" if sol_eur is None else f"{float(sol_eur):.2f} €", "für Portfolio-Sicht", "info"),
+        ("Portfolio" if mode == "personal" else "SOL/BTC", fmt_eur(portfolio_eur) if mode == "personal" and portfolio_eur is not None else f"{sol_btc:.6f}", "Personal Mode" if mode == "personal" else "Relative Stärke", "good" if mode == "personal" else "info"),
     ]
-    st.markdown('<div class="sol-card-grid">' + "".join(cards) + '</div>', unsafe_allow_html=True)
+
+    cols = st.columns(len(card_data))
+    for col, (label, value, caption, tone) in zip(cols, card_data):
+        with col:
+            render_native_card(label, value, caption, tone)
+
     st.progress(max(0, min(int(score), 100)) / 100)
     st.caption(f"Live-Kurs zuletzt abgefragt: {fmt_datetime_utc(live.get('timestamp'))}")
 
@@ -424,12 +438,12 @@ def render_overview_tab(df, latest, result, live, wallet_summary) -> None:
     )
 
     sub_rows = compute_subscores(result)
-    sub_cards = []
-    for row in sub_rows[:6]:
-        val = safe_float(row.get("Score"), 50)
-        sub_cards.append(_card(str(row.get("Bereich", "Score")), f"{val:.0f}/100", str(row.get("Kommentar", "")), _tone_for_score(val)))
-    if sub_cards:
-        st.markdown('<div class="sol-card-grid">' + "".join(sub_cards) + '</div>', unsafe_allow_html=True)
+    if sub_rows:
+        cols = st.columns(min(3, max(1, len(sub_rows[:6]))))
+        for i, row in enumerate(sub_rows[:6]):
+            val = safe_float(row.get("Score"), 50)
+            with cols[i % len(cols)]:
+                render_native_card(str(row.get("Bereich", "Score")), f"{val:.0f}/100", str(row.get("Kommentar", "")), _tone_for_score(val))
 
     explanation = score_explanation(result)
     col1, col2, col3 = st.columns(3)
