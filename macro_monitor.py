@@ -108,7 +108,7 @@ def fetch_fred_quote(series_id: str, label: str, kind: str = "number") -> dict[s
         "change_pct": change_pct,
         "kind": kind,
         "date": points[-1][0] if points else None,
-        "source": "FRED",
+        "source": "FRED" if current is not None else "FRED nicht erreichbar",
         "source_url": f"https://fred.stlouisfed.org/series/{series_id}",
     }
 
@@ -127,7 +127,7 @@ def fetch_stooq_quote(symbol: str, label: str, kind: str = "number") -> dict[str
         "change_pct": change_pct,
         "kind": kind,
         "date": (row or {}).get("Date"),
-        "source": "Stooq",
+        "source": "Stooq" if close is not None else "Stooq nicht erreichbar",
         "source_url": f"https://stooq.com/q/?s={symbol}",
     }
 
