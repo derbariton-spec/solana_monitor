@@ -28,6 +28,7 @@ from data_sources import (
     summarize_liquidation_levels,
 )
 from formatting import fmt_datetime_utc, fmt_eur, fmt_number, fmt_pct, fmt_usd, is_missing, safe_float
+from market_intelligence import build_market_intelligence
 from market_signals import build_market_signal_report, signal_rows
 from news_fetcher import fetch_news
 from portfolio import PositionSettings, compute_portfolio
@@ -572,6 +573,75 @@ def render_overview_tab(df, latest, result, live, wallet_summary) -> None:
         st.dataframe(pd.DataFrame(sub_rows), hide_index=True, use_container_width=True)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_intelligence_signal_report(latest_key: str | None = None, past_key: str | None = None) -> dict:
+    candles = fetch_coinbase_candles(DEFAULT_PRODUCT_ID, days=90, granularity=21600)
+    report = build_market_signal_report(candles, latest=None, past=None)
+    return {"candles": candles, "report": report}
+
+
+def _level_rows(levels: list[float], kind: str) -> list[dict[str, str]]:
+    icon = "🔴" if kind == "Resistance" else "🟢"
+    label = "Short-Liquidität / Breakout-Zone" if kind == "Resistance" else "Retest / Support-Zone"
+    return [{"Typ": kind, "Level": f"{icon} {fmt_usd(level)}", "Lesart": label} for level in levels]
+
+
+def render_market_intelligence_tab(latest: dict | None, past: dict | None, live: dict, portfolio: dict) -> None:
+    st.subheader("🧠 SOL Market Intelligence")
+    st.caption("Marktstruktur, technische Liquiditätszonen, Macro-Fallbacks und deine Portfolio-Exposure in einer Ansicht.")
+
+    latest_key = str((latest or {}).get("snapshot_date"))
+    past_key = str((past or {}).get("snapshot_date")) if past is not None else None
+    cached = cached_intelligence_signal_report(latest_key, past_key)
+    candles = cached.get("candles")
+    signal_report = cached.get("report") or {}
+    intelligence = build_market_intelligence(candles, live, portfolio, latest=latest, signal_report=signal_report)
+
+    structure = intelligence["structure"]
+    liquidity = intelligence["liquidity"]
+    tech = structure.get("technical") or {}
+    exposure_sol = safe_float(portfolio.get("sol_equivalent"), 0.0) + safe_float(portfolio.get("sol_balance"), 0.0)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("SOL/USD", fmt_usd(live.get("sol_usd")), None if live.get("sol_24h_change") is None else fmt_pct(live.get("sol_24h_change")) + " 24h")
+    c2.metric("Trend", str(structure.get("label", "n/a")), (tech.get("macd_cross") or {}).get("label"))
+    c3.metric("Liquidity Bias", str(liquidity.get("bias", "n/a")), f"↑ {liquidity.get('up_probability')}% / ↓ {liquidity.get('down_probability')}%")
+    c4.metric("SOL Exposure", fmt_number(exposure_sol, 2), "Portfolio-Hebel pro SOL-$")
+
+    st.markdown("### Key Levels")
+    level_rows = []
+    level_rows.extend(_level_rows(intelligence["levels"].get("resistance") or [], "Resistance"))
+    level_rows.extend(_level_rows(intelligence["levels"].get("support") or [], "Support"))
+    if level_rows:
+        st.dataframe(pd.DataFrame(level_rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("Noch keine belastbaren Swing-Level aus den aktuellen Kerzen ermittelt.")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("### Liquidity Engine")
+        st.dataframe(
+            pd.DataFrame([
+                {"Signal": "Upside Liquidity", "Wert": ", ".join(fmt_usd(x) for x in liquidity.get("upside_targets") or []) or "n/a"},
+                {"Signal": "Downside Liquidity", "Wert": ", ".join(fmt_usd(x) for x in liquidity.get("downside_targets") or []) or "n/a"},
+                {"Signal": "Sweep higher", "Wert": f"{liquidity.get('up_probability')}%"},
+                {"Signal": "Breakdown", "Wert": f"{liquidity.get('down_probability')}%"},
+            ]),
+            hide_index=True,
+            use_container_width=True,
+        )
+    with right:
+        st.markdown("### Your Position")
+        st.metric("JitoSOL", fmt_number(portfolio.get("jitosol_amount"), 5), f"{fmt_number(portfolio.get('sol_equivalent'), 2)} SOL exposure")
+        st.dataframe(pd.DataFrame(intelligence["position_rows"]), hide_index=True, use_container_width=True)
+
+    st.markdown("### Macro Layer")
+    st.dataframe(pd.DataFrame(intelligence["macro"]), hide_index=True, use_container_width=True)
+
+    st.markdown("### AI Interpretation")
+    st.info(intelligence["interpretation"])
+
+
 def render_market_tab(live: dict) -> None:
     st.subheader("SOL/USD Candlestick")
     r_col, i_col = st.columns(2)
@@ -1100,12 +1170,12 @@ def main() -> None:
 
     if mode == "personal":
         tab_names = [
-            "Übersicht", "News", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
+            "Übersicht", "Market Intelligence", "News", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
             "These", "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
         ]
     else:
         tab_names = [
-            "Übersicht", "News", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
+            "Übersicht", "Market Intelligence", "News", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
             "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
         ]
     tabs = st.tabs(tab_names)
@@ -1113,6 +1183,8 @@ def main() -> None:
     tab_map = dict(zip(tab_names, tabs))
     with tab_map["Übersicht"]:
         render_overview_tab(df, latest, result, live, wallet_summary)
+    with tab_map["Market Intelligence"]:
+        render_market_intelligence_tab(latest, past, live, portfolio)
     with tab_map["News"]:
         render_news_tab()
     with tab_map["Markt"]:
