@@ -28,6 +28,7 @@ from data_sources import (
     summarize_liquidation_levels,
 )
 from formatting import fmt_datetime_utc, fmt_eur, fmt_number, fmt_pct, fmt_usd, is_missing, safe_float
+from macro_monitor import build_macro_monitor
 from market_intelligence import build_market_intelligence
 from market_signals import build_market_signal_report, signal_rows
 from news_fetcher import fetch_news
@@ -710,6 +711,58 @@ def render_market_signals_tab(latest: dict | None, past: dict | None) -> None:
     )
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_macro_monitor() -> dict:
+    return build_macro_monitor()
+
+
+def render_macro_monitor_tab() -> None:
+    st.subheader("🌐 Macro Monitor")
+    st.caption("US-Staatsanleihen, Inflation, Öl, Dollar, FedWatch-Link und geopolitischer News-Risiko-Scan.")
+
+    data = cached_macro_monitor()
+    score = safe_float(data.get("score"), 50)
+    label = str(data.get("label") or "Macro neutral / beobachten")
+    geo = data.get("geopolitics") or {}
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Macro Score", f"{score:.0f}/100", label)
+    c2.metric("Geopolitik", str(geo.get("status") or "n/a"), str(geo.get("reading") or ""))
+    c3.metric("Risk Headlines", str(geo.get("risk_hits", 0)), "News-Scan")
+    c4.link_button("CME FedWatch öffnen", data.get("fedwatch_url") or "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html", use_container_width=True)
+
+    st.markdown("### Macro Layers")
+    rows = data.get("rows") or []
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("Makrodaten konnten aktuell nicht geladen werden.")
+
+    st.markdown("### Fed Watch")
+    st.info(
+        "CME FedWatch ist in V1 als externer Live-Link eingebunden. "
+        "Die maschinenlesbare Einbindung ist je nach CME-Seite/Cloud-Region unzuverlässig; "
+        "der Macro Score nutzt deshalb Renditen, CPI, Dollar, Öl und News-Risiko als robuste Proxy-Schicht."
+    )
+
+    st.markdown("### Geopolitical Radar")
+    news = data.get("news") or []
+    if not news:
+        st.info("Keine geopolitischen News geladen.")
+        return
+    for item in news[:10]:
+        risk = safe_float(item.get("risk_score"), 0)
+        badge = "🔴 Risiko" if risk >= 2 else "🟡 Watch" if risk >= 1 else "🟢 Normal"
+        with st.container(border=True):
+            st.markdown(_badge(badge, "bad" if risk >= 2 else "warn" if risk >= 1 else "good"), unsafe_allow_html=True)
+            st.markdown(f"### {item.get('title', 'Ohne Titel')}")
+            st.caption(f"{item.get('source', 'Quelle')} · {item.get('published', '')}")
+            if item.get("summary"):
+                st.write(item.get("summary"))
+            if item.get("link"):
+                st.link_button("Quelle öffnen", item.get("link"))
+
+
 def render_onboarding_tab(live: dict) -> None:
     st.subheader("🔐 Profil & Onboarding")
     st.caption("Hier wird aus dem privaten Monitor eine Multi-User-Version: Public Mode für alle, Personal Mode je Login getrennt per Supabase/RLS.")
@@ -1180,12 +1233,12 @@ def main() -> None:
 
     if mode == "personal":
         tab_names = [
-            "Übersicht", "Market Intelligence", "News", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
+            "Übersicht", "Market Intelligence", "Macro Monitor", "News", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
             "These", "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
         ]
     else:
         tab_names = [
-            "Übersicht", "Market Intelligence", "News", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
+            "Übersicht", "Market Intelligence", "Macro Monitor", "News", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
             "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
         ]
     tabs = st.tabs(tab_names)
@@ -1195,6 +1248,8 @@ def main() -> None:
         render_overview_tab(df, latest, result, live, wallet_summary)
     with tab_map["Market Intelligence"]:
         render_market_intelligence_tab(latest, past, live, portfolio)
+    with tab_map["Macro Monitor"]:
+        render_macro_monitor_tab()
     with tab_map["News"]:
         render_news_tab()
     with tab_map["Markt"]:
