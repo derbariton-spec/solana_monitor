@@ -18,15 +18,16 @@ HEADERS = {
 }
 STOOQ_QUOTE_URL = "https://stooq.com/q/l/"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 CME_FEDWATCH_URL = "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"
 
 MACRO_QUOTES = {
-    "wti_oil": {"symbol": "CL=F", "stooq_symbol": "cl.f", "label": "WTI Oil", "kind": "usd"},
-    "brent_oil": {"symbol": "BZ=F", "stooq_symbol": "bz.f", "label": "Brent Oil", "kind": "usd"},
-    "dxy": {"symbol": "DX-Y.NYB", "stooq_symbol": "dx.f", "label": "US Dollar Index", "kind": "number"},
-    "us_2y": {"symbol": "^IRX", "stooq_symbol": "2usy.b", "label": "US Short Yield Proxy", "kind": "pct"},
-    "us_10y": {"symbol": "^TNX", "stooq_symbol": "10usy.b", "label": "US 10Y Yield", "kind": "pct"},
+    "wti_oil": {"fred_id": "DCOILWTICO", "symbol": "CL=F", "stooq_symbol": "cl.f", "label": "WTI Oil", "kind": "usd"},
+    "brent_oil": {"fred_id": "DCOILBRENTEU", "symbol": "BZ=F", "stooq_symbol": "bz.f", "label": "Brent Oil", "kind": "usd"},
+    "dxy": {"fred_id": "DTWEXBGS", "symbol": "DX-Y.NYB", "stooq_symbol": "dx.f", "label": "Trade Weighted US Dollar", "kind": "number"},
+    "us_2y": {"fred_id": "DGS2", "symbol": "^IRX", "stooq_symbol": "2usy.b", "label": "US 2Y Yield", "kind": "pct"},
+    "us_10y": {"fred_id": "DGS10", "symbol": "^TNX", "stooq_symbol": "10usy.b", "label": "US 10Y Yield", "kind": "pct"},
 }
 
 GEOPOLITICAL_FEEDS = {
@@ -78,6 +79,38 @@ def _csv_row(text: str) -> dict[str, str] | None:
     if len(headers) != len(values):
         return None
     return dict(zip(headers, values))
+
+
+def _fred_points(text: str, series_id: str) -> list[tuple[str, float]]:
+    points: list[tuple[str, float]] = []
+    for line in text.splitlines()[1:]:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        date, raw_value = parts[0], parts[1]
+        value = safe_float(raw_value, None)
+        if value is not None:
+            points.append((date, value))
+    return points
+
+
+def fetch_fred_quote(series_id: str, label: str, kind: str = "number") -> dict[str, Any]:
+    response = _get(FRED_CSV_URL, {"id": series_id})
+    points = _fred_points(response.text, series_id) if response is not None else []
+    current = points[-1][1] if points else None
+    previous = points[-2][1] if len(points) >= 2 else None
+    change_pct = ((current - previous) / previous * 100) if current is not None and previous not in (None, 0) else None
+    return {
+        "ok": current is not None,
+        "key": series_id,
+        "label": label,
+        "value": current,
+        "change_pct": change_pct,
+        "kind": kind,
+        "date": points[-1][0] if points else None,
+        "source": "FRED",
+        "source_url": f"https://fred.stlouisfed.org/series/{series_id}",
+    }
 
 
 def fetch_stooq_quote(symbol: str, label: str, kind: str = "number") -> dict[str, Any]:
@@ -135,6 +168,11 @@ def fetch_yahoo_quote(symbol: str, label: str, kind: str = "number") -> dict[str
 
 
 def fetch_macro_quote(meta: dict[str, Any]) -> dict[str, Any]:
+    fred_id = meta.get("fred_id")
+    if fred_id:
+        fred = fetch_fred_quote(fred_id, meta["label"], meta["kind"])
+        if fred.get("ok"):
+            return fred
     yahoo = fetch_yahoo_quote(meta["symbol"], meta["label"], meta["kind"])
     if yahoo.get("ok"):
         return yahoo
