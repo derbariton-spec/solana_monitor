@@ -5,23 +5,28 @@ import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
 from config import REQUEST_TIMEOUT, USER_AGENT
 from formatting import fmt_pct, fmt_usd, safe_float
 
-HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json,text/csv,text/html"}
+HEADERS = {
+    "User-Agent": f"Mozilla/5.0 {USER_AGENT}",
+    "Accept": "application/json,text/csv,text/html",
+}
 STOOQ_QUOTE_URL = "https://stooq.com/q/l/"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 CME_FEDWATCH_URL = "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"
 
 MACRO_QUOTES = {
-    "wti_oil": {"symbol": "cl.f", "label": "WTI Oil", "kind": "usd"},
-    "brent_oil": {"symbol": "bz.f", "label": "Brent Oil", "kind": "usd"},
-    "dxy": {"symbol": "dx.f", "label": "US Dollar Index", "kind": "number"},
-    "us_2y": {"symbol": "2usy.b", "label": "US 2Y Yield", "kind": "pct"},
-    "us_10y": {"symbol": "10usy.b", "label": "US 10Y Yield", "kind": "pct"},
+    "wti_oil": {"symbol": "CL=F", "stooq_symbol": "cl.f", "label": "WTI Oil", "kind": "usd"},
+    "brent_oil": {"symbol": "BZ=F", "stooq_symbol": "bz.f", "label": "Brent Oil", "kind": "usd"},
+    "dxy": {"symbol": "DX-Y.NYB", "stooq_symbol": "dx.f", "label": "US Dollar Index", "kind": "number"},
+    "us_2y": {"symbol": "^IRX", "stooq_symbol": "2usy.b", "label": "US Short Yield Proxy", "kind": "pct"},
+    "us_10y": {"symbol": "^TNX", "stooq_symbol": "10usy.b", "label": "US 10Y Yield", "kind": "pct"},
 }
 
 GEOPOLITICAL_FEEDS = {
@@ -41,6 +46,16 @@ def _get(url: str, params: dict[str, Any] | None = None) -> requests.Response | 
         response = requests.get(url, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         return response
+    except Exception:
+        return None
+
+
+def _get_json(url: str, params: dict[str, Any] | None = None) -> Any | None:
+    response = _get(url, params=params)
+    if response is None:
+        return None
+    try:
+        return response.json()
     except Exception:
         return None
 
@@ -84,9 +99,56 @@ def fetch_stooq_quote(symbol: str, label: str, kind: str = "number") -> dict[str
     }
 
 
+def fetch_yahoo_quote(symbol: str, label: str, kind: str = "number") -> dict[str, Any]:
+    data = _get_json(YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")), {"range": "5d", "interval": "1d"})
+    try:
+        result = data["chart"]["result"][0]
+        meta = result.get("meta") or {}
+        close_values = [safe_float(v, None) for v in (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [])]
+        close_values = [v for v in close_values if v is not None]
+        current = safe_float(meta.get("regularMarketPrice"), None) or (close_values[-1] if close_values else None)
+        previous = close_values[-2] if len(close_values) >= 2 else safe_float(meta.get("chartPreviousClose"), None)
+        change_pct = ((current - previous) / previous * 100) if current is not None and previous not in (None, 0) else None
+        return {
+            "ok": current is not None,
+            "key": symbol,
+            "label": label,
+            "value": current,
+            "change_pct": change_pct,
+            "kind": kind,
+            "date": None,
+            "source": "Yahoo Finance Chart API",
+            "source_url": f"https://finance.yahoo.com/quote/{symbol}",
+        }
+    except Exception:
+        return {
+            "ok": False,
+            "key": symbol,
+            "label": label,
+            "value": None,
+            "change_pct": None,
+            "kind": kind,
+            "date": None,
+            "source": "Yahoo Finance Chart API nicht erreichbar",
+            "source_url": f"https://finance.yahoo.com/quote/{symbol}",
+        }
+
+
+def fetch_macro_quote(meta: dict[str, Any]) -> dict[str, Any]:
+    yahoo = fetch_yahoo_quote(meta["symbol"], meta["label"], meta["kind"])
+    if yahoo.get("ok"):
+        return yahoo
+    stooq = fetch_stooq_quote(meta.get("stooq_symbol") or meta["symbol"], meta["label"], meta["kind"])
+    if stooq.get("ok"):
+        stooq["source"] = "Stooq Fallback"
+        return stooq
+    yahoo["source"] = "Yahoo/Stooq nicht erreichbar"
+    return yahoo
+
+
 def fetch_macro_quotes() -> dict[str, dict[str, Any]]:
     return {
-        key: fetch_stooq_quote(meta["symbol"], meta["label"], meta["kind"])
+        key: fetch_macro_quote(meta)
         for key, meta in MACRO_QUOTES.items()
     }
 
