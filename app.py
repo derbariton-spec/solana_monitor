@@ -586,12 +586,22 @@ def _level_rows(levels: list[float], kind: str) -> list[dict[str, str]]:
     return [{"Typ": kind, "Level": f"{icon} {fmt_usd(level)}", "Lesart": label} for level in levels]
 
 
+def _snapshot_cache_key(row: dict | pd.Series | None) -> str | None:
+    if row is None:
+        return None
+    try:
+        value = row.get("snapshot_date")
+    except Exception:
+        return str(row)
+    return None if value is None else str(value)
+
+
 def render_market_intelligence_tab(latest: dict | None, past: dict | None, live: dict, portfolio: dict) -> None:
     st.subheader("🧠 SOL Market Intelligence")
     st.caption("Marktstruktur, technische Liquiditätszonen, Macro-Fallbacks und deine Portfolio-Exposure in einer Ansicht.")
 
-    latest_key = str((latest or {}).get("snapshot_date"))
-    past_key = str((past or {}).get("snapshot_date")) if past is not None else None
+    latest_key = _snapshot_cache_key(latest)
+    past_key = _snapshot_cache_key(past)
     cached = cached_intelligence_signal_report(latest_key, past_key)
     candles = cached.get("candles")
     signal_report = cached.get("report") or {}
