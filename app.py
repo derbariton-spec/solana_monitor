@@ -539,8 +539,31 @@ def _composite_tone(score: float) -> str:
     return "bad"
 
 
+def _score_badge(score: float | None) -> str:
+    value = safe_float(score, None)
+    if value is None:
+        return _badge("⚪ n/a", "info")
+    if value >= 70:
+        return _badge("🟢 grün", "good")
+    if value >= 50:
+        return _badge("🟡 gelb", "warn")
+    return _badge("🔴 rot", "bad")
+
+
+def _score_badge_text(score: float | None) -> str:
+    value = safe_float(score, None)
+    if value is None:
+        return "⚪ n/a"
+    if value >= 70:
+        return "🟢 grün"
+    if value >= 50:
+        return "🟡 gelb"
+    return "🔴 rot"
+
+
 def _score_line(label: str, score: float, weight: int, note: str) -> dict[str, str]:
     return {
+        "Ampel": _score_badge_text(score),
         "Baustein": label,
         "Score": f"{score:.0f}/100",
         "Gewicht": f"{weight}%",
@@ -569,18 +592,18 @@ def render_overview_tab(df, latest, past, result, live, wallet_summary, portfoli
     st.markdown(
         f"""
 <div class="sol-summary-box">
-  <b>Gesamtlage: {composite_label}</b> · Composite Score <b>{composite:.0f}/100</b><br/>
-  Fundamental Thesis: <b>{score:.0f}/100</b> · Market Timing: <b>{market_score:.0f}/100</b> · Macro: <b>{macro_score_value:.0f}/100</b>
+  {_score_badge(composite)} <b>Gesamtlage: {composite_label}</b> · Composite Score <b>{composite:.0f}/100</b><br/>
+  {_score_badge(score)} Fundamental Thesis: <b>{score:.0f}/100</b> · {_score_badge(market_score)} Market Timing: <b>{market_score:.0f}/100</b> · {_score_badge(macro_score_value)} Macro: <b>{macro_score_value:.0f}/100</b>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
     score_cards = [
-        ("Composite", f"{composite:.0f}/100", "55% Thesis · 25% Timing · 20% Macro", _composite_tone(composite)),
-        ("Fundamental Thesis", f"{score:.0f}/100", f"Solana-These {status_text}", _status_tone(status)),
-        ("Market Timing", f"{market_score:.0f}/100", market_label, _tone_for_score(market_score)),
-        ("Macro", f"{macro_score_value:.0f}/100", macro_label, _tone_for_score(macro_score_value)),
+        ("Composite", f"{composite:.0f}/100", f"{_score_badge_text(composite)} · 55% Thesis · 25% Timing · 20% Macro", _composite_tone(composite)),
+        ("Fundamental Thesis", f"{score:.0f}/100", f"{_score_badge_text(score)} · Solana-These {status_text}", _status_tone(status)),
+        ("Market Timing", f"{market_score:.0f}/100", f"{_score_badge_text(market_score)} · {market_label}", _tone_for_score(market_score)),
+        ("Macro", f"{macro_score_value:.0f}/100", f"{_score_badge_text(macro_score_value)} · {macro_label}", _tone_for_score(macro_score_value)),
     ]
     cols = st.columns(4)
     for col, (label, value, caption, tone) in zip(cols, score_cards):
