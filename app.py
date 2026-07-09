@@ -521,21 +521,87 @@ def render_top_metrics(latest, live: dict, result: dict, portfolio: dict | None 
 # Individual tabs
 # -----------------------------
 
-def render_overview_tab(df, latest, result, live, wallet_summary) -> None:
+def _composite_label(score: float) -> str:
+    if score >= 70:
+        return "konstruktiv"
+    if score >= 55:
+        return "leicht konstruktiv"
+    if score >= 45:
+        return "neutral / beobachten"
+    return "riskant"
+
+
+def _composite_tone(score: float) -> str:
+    if score >= 65:
+        return "good"
+    if score >= 45:
+        return "warn"
+    return "bad"
+
+
+def _score_line(label: str, score: float, weight: int, note: str) -> dict[str, str]:
+    return {
+        "Baustein": label,
+        "Score": f"{score:.0f}/100",
+        "Gewicht": f"{weight}%",
+        "Lesart": note,
+    }
+
+
+def render_overview_tab(df, latest, past, result, live, wallet_summary, portfolio) -> None:
     score = safe_float(result.get("score"), 50)
     status = result.get("status", "neutral")
     status_text = "intakt" if status == "intakt" else "geschwächt" if status == "geschwaecht" else "neutral"
-    st.markdown("<div class='sol-section-title'>Heute wichtig</div>", unsafe_allow_html=True)
+
+    latest_key = _snapshot_cache_key(latest)
+    past_key = _snapshot_cache_key(past)
+    signal_cached = cached_intelligence_signal_report(latest_key, past_key)
+    signal_report = signal_cached.get("report") or {}
+    macro_data = cached_macro_monitor()
+    market_score = safe_float(signal_report.get("timing_score"), 50)
+    macro_score_value = safe_float(macro_data.get("score"), 50)
+    composite = round(score * 0.55 + market_score * 0.25 + macro_score_value * 0.20, 1)
+    composite_label = _composite_label(composite)
+    macro_label = str(macro_data.get("label") or "Macro neutral / beobachten")
+    market_label = str(signal_report.get("label") or "neutral")
+
+    st.markdown("<div class='sol-section-title'>Command Center</div>", unsafe_allow_html=True)
     st.markdown(
         f"""
 <div class="sol-summary-box">
-  <b>Solana-These: {status_text}</b> · Score <b>{score:.0f}/100</b><br/>
-  {interpretation_text(result)}
+  <b>Gesamtlage: {composite_label}</b> · Composite Score <b>{composite:.0f}/100</b><br/>
+  Fundamental Thesis: <b>{score:.0f}/100</b> · Market Timing: <b>{market_score:.0f}/100</b> · Macro: <b>{macro_score_value:.0f}/100</b>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
+    score_cards = [
+        ("Composite", f"{composite:.0f}/100", "55% Thesis · 25% Timing · 20% Macro", _composite_tone(composite)),
+        ("Fundamental Thesis", f"{score:.0f}/100", f"Solana-These {status_text}", _status_tone(status)),
+        ("Market Timing", f"{market_score:.0f}/100", market_label, _tone_for_score(market_score)),
+        ("Macro", f"{macro_score_value:.0f}/100", macro_label, _tone_for_score(macro_score_value)),
+    ]
+    cols = st.columns(4)
+    for col, (label, value, caption, tone) in zip(cols, score_cards):
+        with col:
+            render_native_card(label, value, caption, tone)
+
+    st.progress(max(0, min(int(composite), 100)) / 100)
+    st.caption(
+        "Composite Score = 55% Fundamental Thesis, 25% Market Timing, 20% Macro. "
+        "Der Fundamental Score bleibt die Langfrist-These; Timing und Makro steuern die aktuelle Risikolage."
+    )
+
+    st.markdown("### Score-Mix")
+    mix_rows = [
+        _score_line("Fundamental Thesis", score, 55, interpretation_text(result)),
+        _score_line("Market Timing", market_score, 25, f"Timing-/Risiko-Lage: {market_label}."),
+        _score_line("Macro Monitor", macro_score_value, 20, macro_label),
+    ]
+    st.dataframe(pd.DataFrame(mix_rows), hide_index=True, use_container_width=True)
+
+    st.markdown("### Fundamental Drivers")
     sub_rows = compute_subscores(result)
     if sub_rows:
         cols = st.columns(min(3, max(1, len(sub_rows[:6]))))
@@ -566,6 +632,31 @@ def render_overview_tab(df, latest, result, live, wallet_summary) -> None:
         st.write(quality_summary(quality_rows))
         if latest is not None:
             st.caption(f"Letzter Fundamentaldaten-Snapshot: {latest.get('snapshot_date')}")
+
+    st.markdown("### Aktuelle Risiko-Lesart")
+    risk_cols = st.columns(2)
+    with risk_cols[0]:
+        positives = signal_report.get("reasons_positive") or ["Keine klaren positiven Timing-Signale."]
+        st.markdown("#### Market Timing")
+        for line in positives[:3]:
+            st.success(line)
+        for line in (signal_report.get("reasons_risk") or [])[:3]:
+            st.warning(line)
+    with risk_cols[1]:
+        st.markdown("#### Macro")
+        macro_rows = macro_data.get("rows") or []
+        if macro_rows:
+            for row in macro_rows[:4]:
+                status_s = str(row.get("Status", ""))
+                text = f"{row.get('Layer')}: {row.get('Wert')} · {row.get('Lesart')}"
+                if status_s.startswith("🔴"):
+                    st.warning(text)
+                elif status_s.startswith("🟢"):
+                    st.success(text)
+                else:
+                    st.info(text)
+        else:
+            st.info("Macro-Daten aktuell nicht verfügbar.")
 
     st.markdown("### These gebrochen?")
     st.dataframe(pd.DataFrame(thesis_break_rules(latest, df, result)), hide_index=True, use_container_width=True)
@@ -1245,7 +1336,7 @@ def main() -> None:
 
     tab_map = dict(zip(tab_names, tabs))
     with tab_map["Übersicht"]:
-        render_overview_tab(df, latest, result, live, wallet_summary)
+        render_overview_tab(df, latest, past, result, live, wallet_summary, portfolio)
     with tab_map["Market Intelligence"]:
         render_market_intelligence_tab(latest, past, live, portfolio)
     with tab_map["Macro Monitor"]:
