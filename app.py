@@ -52,6 +52,7 @@ from risk import build_risk_rows
 from scenario import DEFAULT_TARGETS, build_price_scenarios
 from scoring import compute_fundamental_score, interpretation_text, traffic_light
 from storage import load_history
+from technicals import technical_score, technical_summary
 from thesis import compute_subscores, score_explanation, thesis_break_rules
 from wallet import fetch_wallet_summary
 
@@ -571,15 +572,36 @@ def _score_line(label: str, score: float, weight: int, note: str) -> dict[str, s
     }
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_overview_market_timing() -> dict:
+    candles = fetch_coinbase_candles(DEFAULT_PRODUCT_ID, days=90, granularity=21600)
+    tech = technical_summary(candles)
+    score, reasons = technical_score(tech)
+    if score >= 70:
+        label = "bullisch"
+    elif score >= 56:
+        label = "vorsichtig bullisch"
+    elif score >= 45:
+        label = "neutral"
+    elif score >= 35:
+        label = "riskant / schwach"
+    else:
+        label = "bearish"
+    return {
+        "timing_score": round(score, 1),
+        "label": label,
+        "technical": tech,
+        "reasons_positive": [r for r in reasons if not any(x in r.lower() for x in ["bearish", "schwach", "überkauft"])],
+        "reasons_risk": [r for r in reasons if any(x in r.lower() for x in ["bearish", "schwach", "überkauft"])],
+    }
+
+
 def render_overview_tab(df, latest, past, result, live, wallet_summary, portfolio) -> None:
     score = safe_float(result.get("score"), 50)
     status = result.get("status", "neutral")
     status_text = "intakt" if status == "intakt" else "geschwächt" if status == "geschwaecht" else "neutral"
 
-    latest_key = _snapshot_cache_key(latest)
-    past_key = _snapshot_cache_key(past)
-    signal_cached = cached_intelligence_signal_report(latest_key, past_key)
-    signal_report = signal_cached.get("report") or {}
+    signal_report = cached_overview_market_timing()
     macro_data = cached_macro_monitor()
     market_score = safe_float(signal_report.get("timing_score"), 50)
     macro_score_value = safe_float(macro_data.get("score"), 50)
@@ -613,7 +635,8 @@ def render_overview_tab(df, latest, past, result, live, wallet_summary, portfoli
     st.progress(max(0, min(int(composite), 100)) / 100)
     st.caption(
         "Composite Score = 55% Fundamental Thesis, 25% Market Timing, 20% Macro. "
-        "Der Fundamental Score bleibt die Langfrist-These; Timing und Makro steuern die aktuelle Risikolage."
+        "Der Fundamental Score bleibt die Langfrist-These; das schnelle Overview-Timing nutzt Coinbase-Kerzen. "
+        "Der volle Derivatives/Sentiment-Report lädt erst im Reiter Market Signals."
     )
 
     st.markdown("### Score-Mix")
@@ -1355,44 +1378,43 @@ def main() -> None:
             "Übersicht", "Market Intelligence", "Macro Monitor", "News", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
             "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
         ]
-    tabs = st.tabs(tab_names)
+    st.sidebar.markdown("## Navigation")
+    current_page = st.sidebar.radio("Bereich", tab_names, index=0, key="main_navigation")
+    st.caption(f"Aktiver Bereich: {current_page}. Nur dieser Bereich wird geladen; andere Daten werden erst beim Öffnen abgefragt.")
 
-    tab_map = dict(zip(tab_names, tabs))
-    with tab_map["Übersicht"]:
+    if current_page == "Übersicht":
         render_overview_tab(df, latest, past, result, live, wallet_summary, portfolio)
-    with tab_map["Market Intelligence"]:
+    elif current_page == "Market Intelligence":
         render_market_intelligence_tab(latest, past, live, portfolio)
-    with tab_map["Macro Monitor"]:
+    elif current_page == "Macro Monitor":
         render_macro_monitor_tab()
-    with tab_map["News"]:
+    elif current_page == "News":
         render_news_tab()
-    with tab_map["Markt"]:
+    elif current_page == "Markt":
         render_market_tab(live)
-    with tab_map["Market Signals"]:
+    elif current_page == "Market Signals":
         render_market_signals_tab(latest, past)
-    if "Profil & Onboarding" in tab_map:
-        with tab_map["Profil & Onboarding"]:
-            render_onboarding_tab(live)
-    if "Portfolio" in tab_map:
-        with tab_map["Portfolio"]:
-            render_portfolio_tab(live)
-    with tab_map["Fundamentals"]:
+    elif current_page == "Profil & Onboarding":
+        render_onboarding_tab(live)
+    elif current_page == "Portfolio":
+        render_portfolio_tab(live)
+    elif current_page == "Fundamentals":
         render_fundamentals_tab(df, latest, prev, result)
-    with tab_map["Datenqualität"]:
+    elif current_page == "Datenqualität":
         render_quality_tab(df, latest, live, wallet_summary)
-    with tab_map["These"]:
+    elif current_page == "These":
         render_thesis_tab(df, latest, result)
-    with tab_map["Szenarien"]:
+    elif current_page == "Szenarien":
         render_scenario_tab(live, portfolio)
-    with tab_map["Risiko"]:
+    elif current_page == "Risiko":
         render_risk_tab(result, live)
-    with tab_map["Wochenbericht"]:
+    elif current_page == "Wochenbericht":
         render_weekly_tab(df, result)
-    with tab_map["Liquidationen"]:
+    elif current_page == "Liquidationen":
         render_coinglass_tab(live)
-    with tab_map["Historie"]:
+    elif current_page == "Historie":
         render_history_tab(df)
-    with tab_map["Rohdaten"]:
+    elif current_page == "Rohdaten":
         st.subheader("Rohdaten")
         st.dataframe(df.sort_values("snapshot_date", ascending=False) if not df.empty else df, use_container_width=True)
 
