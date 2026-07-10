@@ -871,7 +871,16 @@ def render_macro_monitor_tab() -> None:
     st.markdown("### Macro Layers")
     rows = data.get("rows") or []
     if rows:
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        macro_df = pd.DataFrame(rows)
+        visible_cols = [col for col in ["Layer", "Wert", "Vortag", "Status", "Lesart", "Quelle"] if col in macro_df.columns]
+        compare_rows = macro_df[macro_df["Vortag"].astype(str).ne("Monatswert")] if "Vortag" in macro_df.columns else pd.DataFrame()
+        if not compare_rows.empty:
+            st.markdown("#### Vortagesvergleich")
+            cols = st.columns(2)
+            for idx, (_, row) in enumerate(compare_rows.iterrows()):
+                with cols[idx % len(cols)]:
+                    st.metric(str(row.get("Layer", "")), str(row.get("Wert", "n/a")), str(row.get("Vortag", "n/a")))
+        st.dataframe(macro_df[visible_cols] if visible_cols else macro_df, hide_index=True, use_container_width=True)
     else:
         st.info("Makrodaten konnten aktuell nicht geladen werden.")
 
