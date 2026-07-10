@@ -105,6 +105,7 @@ def fetch_fred_quote(series_id: str, label: str, kind: str = "number") -> dict[s
         "key": series_id,
         "label": label,
         "value": current,
+        "previous_value": previous,
         "change_pct": change_pct,
         "kind": kind,
         "date": points[-1][0] if points else None,
@@ -124,6 +125,7 @@ def fetch_stooq_quote(symbol: str, label: str, kind: str = "number") -> dict[str
         "key": symbol,
         "label": label,
         "value": close,
+        "previous_value": open_,
         "change_pct": change_pct,
         "kind": kind,
         "date": (row or {}).get("Date"),
@@ -147,6 +149,7 @@ def fetch_yahoo_quote(symbol: str, label: str, kind: str = "number") -> dict[str
             "key": symbol,
             "label": label,
             "value": current,
+            "previous_value": previous,
             "change_pct": change_pct,
             "kind": kind,
             "date": None,
@@ -159,6 +162,7 @@ def fetch_yahoo_quote(symbol: str, label: str, kind: str = "number") -> dict[str
             "key": symbol,
             "label": label,
             "value": None,
+            "previous_value": None,
             "change_pct": None,
             "kind": kind,
             "date": None,
@@ -320,6 +324,19 @@ def _status_from_quote(key: str, quote: dict[str, Any]) -> tuple[str, str]:
     return "🟡 Watch", "beobachten"
 
 
+def _change_text(kind: str | None, current: Any, previous: Any, change_pct: Any) -> str:
+    current_f = safe_float(current, None)
+    previous_f = safe_float(previous, None)
+    change_f = safe_float(change_pct, None)
+    if current_f is None or previous_f is None:
+        return "n/a"
+    arrow = "↗" if current_f > previous_f else "↘" if current_f < previous_f else "→"
+    if kind == "pct":
+        bps = (current_f - previous_f) * 100
+        return f"{arrow} {bps:+.0f} bp ({fmt_pct(change_f, 2)})" if change_f is not None else f"{arrow} {bps:+.0f} bp"
+    return f"{arrow} {fmt_pct(change_f, 2)}" if change_f is not None else arrow
+
+
 def macro_rows(quotes: dict[str, dict[str, Any]], cpi: dict[str, Any]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for key in ("wti_oil", "brent_oil", "us_2y", "us_10y", "dxy"):
@@ -327,6 +344,7 @@ def macro_rows(quotes: dict[str, dict[str, Any]], cpi: dict[str, Any]) -> list[d
         status, reading = _status_from_quote(key, quote)
         kind = quote.get("kind")
         value = quote.get("value")
+        previous = quote.get("previous_value")
         if kind == "usd":
             value_text = fmt_usd(value)
         elif kind == "pct":
@@ -336,6 +354,7 @@ def macro_rows(quotes: dict[str, dict[str, Any]], cpi: dict[str, Any]) -> list[d
         rows.append({
             "Layer": quote.get("label", key),
             "Wert": value_text,
+            "Vortag": _change_text(kind, value, previous, quote.get("change_pct")),
             "Status": status,
             "Lesart": reading,
             "Quelle": quote.get("source", "n/a"),
@@ -357,6 +376,7 @@ def macro_rows(quotes: dict[str, dict[str, Any]], cpi: dict[str, Any]) -> list[d
     rows.append({
         "Layer": "US CPI YoY",
         "Wert": "n/a" if yoy is None else fmt_pct(yoy, 1),
+        "Vortag": "Monatswert",
         "Status": status,
         "Lesart": reading,
         "Quelle": cpi.get("source", "BLS"),
