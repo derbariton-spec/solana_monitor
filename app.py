@@ -1286,7 +1286,7 @@ def _news_signal_tone(classification: str) -> str:
 
 def render_news_tab() -> None:
     st.subheader("📰 News Radar")
-    st.caption("Breiterer News-Feed aus mehreren Solana-Suchclustern: Markt, ETF, RWA, Stablecoins, DeFi, Tech, Reddit.")
+    st.caption("Breiterer News-Feed aus Kryptovergleich, mehreren Solana-Suchclustern, Markt, ETF, RWA, Stablecoins, DeFi, Tech und Reddit.")
     items = cached_news()
     if not items:
         st.info("Aktuell wurden keine News geladen.")

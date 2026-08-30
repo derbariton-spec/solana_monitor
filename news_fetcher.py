@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
+
+import requests
 
 POSITIVE_KEYWORDS = [
     "etf", "rwa", "tokenized", "tokenised", "tokenization", "tokenisation", "moneygram",
@@ -32,6 +35,10 @@ NEWS_FEEDS: dict[str, str] = {
     "Reddit r/solana": "https://www.reddit.com/r/solana/.rss",
     "Reddit r/CryptoCurrency Solana": "https://www.reddit.com/r/CryptoCurrency/search.rss?q=Solana&restrict_sr=on&sort=new&t=week",
 }
+
+KRYPTOVERGLEICH_SOLANA_NEWS_URL = "https://www.kryptovergleich.de/kryptowaehrungen/solana/news"
+HTTP_HEADERS = {"User-Agent": "solana-research-terminal/5.3", "Accept": "text/html,application/xhtml+xml"}
+REQUEST_TIMEOUT = 20
 
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "ETF / Institutional": ["etf", "institution", "blackrock", "franklin", "treasury", "sec"],
@@ -82,6 +89,21 @@ def _format_published(dt: datetime | None, fallback: str = "") -> str:
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def classify_news(title: str, summary: str = "") -> str:
     text = f"{title} {summary}".lower()
     pos = sum(1 for w in POSITIVE_KEYWORDS if w in text)
@@ -105,6 +127,87 @@ def categorize_news(title: str, summary: str = "", source: str = "") -> str:
     return best_category
 
 
+def _json_ld_objects(page_html: str) -> list[Any]:
+    objects: list[Any] = []
+    pattern = r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
+    for match in re.finditer(pattern, page_html, flags=re.IGNORECASE | re.DOTALL):
+        raw = html.unescape(match.group(1)).strip()
+        if not raw:
+            continue
+        try:
+            objects.append(json.loads(raw))
+        except Exception:
+            continue
+    return objects
+
+
+def _iter_news_articles(value: Any) -> list[dict[str, Any]]:
+    articles: list[dict[str, Any]] = []
+    if isinstance(value, list):
+        for item in value:
+            articles.extend(_iter_news_articles(item))
+        return articles
+    if not isinstance(value, dict):
+        return articles
+
+    typ = value.get("@type")
+    if typ == "NewsArticle" or (isinstance(typ, list) and "NewsArticle" in typ):
+        articles.append(value)
+
+    main_entity = value.get("mainEntity")
+    if isinstance(main_entity, dict):
+        articles.extend(_iter_news_articles(main_entity))
+
+    item_list = value.get("itemListElement")
+    if isinstance(item_list, list):
+        for item in item_list:
+            articles.extend(_iter_news_articles(item))
+    return articles
+
+
+def fetch_kryptovergleich_news(max_items: int = 10) -> list[dict[str, Any]]:
+    try:
+        response = requests.get(KRYPTOVERGLEICH_SOLANA_NEWS_URL, headers=HTTP_HEADERS, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+    except Exception as exc:
+        return [{
+            "source": "Kryptovergleich: Solana News",
+            "title": f"Kryptovergleich konnte nicht geladen werden: {exc}",
+            "link": KRYPTOVERGLEICH_SOLANA_NEWS_URL,
+            "published": "",
+            "published_ts": 0.0,
+            "summary": "",
+            "category": "System",
+            "classification": "🟡 Neutral",
+        }]
+
+    items: list[dict[str, Any]] = []
+    for obj in _json_ld_objects(response.text):
+        for article in _iter_news_articles(obj):
+            title = _clean_text(article.get("headline") or article.get("name") or "Ohne Titel")
+            summary = _clean_text(article.get("description") or "")
+            link = str(article.get("url") or KRYPTOVERGLEICH_SOLANA_NEWS_URL)
+            published_dt = _parse_iso_datetime(article.get("datePublished") or article.get("dateModified"))
+            publisher = article.get("publisher") or {}
+            publisher_name = publisher.get("name") if isinstance(publisher, dict) else ""
+            source = "Kryptovergleich: Solana News"
+            if publisher_name:
+                source = f"{source} · {publisher_name}"
+            items.append({
+                "source": source,
+                "title": title,
+                "link": link,
+                "published": _format_published(published_dt),
+                "published_ts": published_dt.timestamp() if published_dt else 0.0,
+                "summary": summary[:420],
+                "category": categorize_news(title, summary, source),
+                "classification": classify_news(title, summary),
+            })
+
+    items.sort(key=lambda x: float(x.get("published_ts") or 0.0), reverse=True)
+    return items[:max_items]
+
+
 def fetch_news(max_items_per_feed: int = 8, max_total: int = 40) -> list[dict[str, Any]]:
     try:
         import feedparser
@@ -122,6 +225,14 @@ def fetch_news(max_items_per_feed: int = 8, max_total: int = 40) -> list[dict[st
 
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
+
+    for item in fetch_kryptovergleich_news(max_items=10):
+        norm = _normalize_title(str(item.get("title") or ""))
+        dedupe_key = norm or str(item.get("link") or "")
+        if not dedupe_key or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        items.append(item)
 
     for source, url in NEWS_FEEDS.items():
         try:

@@ -2,24 +2,35 @@ name: Daily Solana Monitor Update
 
 "on":
   schedule:
+    # Four automatic snapshots per day. GitHub cron uses UTC.
     - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: solana-monitor-data-update
+  cancel-in-progress: false
+
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
@@ -30,10 +41,30 @@ jobs:
         run: |
           python fetch_data.py
 
+      - name: Validate updated CSV
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import pandas as pd
+
+          df = pd.read_csv("data/solana_fundamentals.csv")
+          if df.empty:
+              raise SystemExit("data/solana_fundamentals.csv is empty")
+
+          latest = str(df["snapshot_date"].iloc[-1])[:10]
+          today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+          if latest != today:
+              raise SystemExit(f"Latest snapshot is {latest}, expected {today}")
+
+          score = df["fundamental_score"].iloc[-1]
+          print(f"Validated snapshot {latest} with score {score}")
+          PY
+
       - name: Commit updated data
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add data/solana_fundamentals.csv
           git diff --cached --quiet || git commit -m "Automatic daily Solana update"
+          git pull --rebase origin main
           git push
