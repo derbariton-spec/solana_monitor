@@ -30,6 +30,22 @@ def current_user() -> dict[str, Any] | None:
     return st.session_state.get("user")
 
 
+def is_local_session() -> bool:
+    user = current_user() or {}
+    return user.get("provider") == "local_session"
+
+
+def start_local_session(display_name: str = "Lokaler Nutzer") -> None:
+    name = display_name.strip() or "Lokaler Nutzer"
+    st.session_state["user"] = {
+        "id": "local-session",
+        "email": "lokale-session",
+        "display_name": name,
+        "provider": "local_session",
+    }
+    st.session_state["remember_login"] = True
+
+
 def sign_out() -> None:
     st.session_state.pop("user", None)
     st.session_state.pop("access_token", None)
@@ -48,6 +64,8 @@ def _profile_display_name() -> str:
     except Exception:
         pass
     user = current_user() or {}
+    if user.get("display_name"):
+        return str(user.get("display_name"))
     email = str(user.get("email") or "")
     local_part = email.split("@")[0].strip()
     if not local_part:
@@ -68,7 +86,10 @@ def render_logged_in_box(key_prefix: str | None = None, *, compact: bool = False
     greeting = user_greeting_name()
     with st.container(border=not compact):
         st.markdown(f"### Hallo, {greeting}")
-        st.caption(f"Eingeloggt als {user.get('email', 'Nutzer')}")
+        if is_local_session():
+            st.caption("Lokale persönliche Sitzung. Daten bleiben nur in dieser Browser-Session.")
+        else:
+            st.caption(f"Eingeloggt als {user.get('email', 'Nutzer')}")
         if st.session_state.get("remember_login"):
             st.caption("Login bleibt in dieser Streamlit-Sitzung aktiv.")
         if st.button("Logout", key=f"{prefix}_logout", use_container_width=True):
@@ -93,11 +114,16 @@ def PathSafe(value: str) -> str:
 def render_auth_box(key_prefix: str | None = None) -> None:
     prefix = _auth_key_prefix(key_prefix)
     client = get_supabase_client()
-    if client is None:
-        st.info("Supabase ist nicht konfiguriert. Portfolio-Daten werden nur lokal in der aktuellen Session genutzt.")
-        return
     if is_logged_in():
         render_logged_in_box(prefix)
+        return
+    if client is None:
+        st.info("Supabase ist nicht konfiguriert. Du kannst trotzdem eine lokale persönliche Sitzung starten. Portfolio-Daten werden nur in der aktuellen Browser-Session genutzt.")
+        display_name = st.text_input("Name für lokale Sitzung", value="Andreas", key=f"{prefix}_local_name")
+        if st.button("Lokale Sitzung starten", key=f"{prefix}_local_submit", use_container_width=True):
+            start_local_session(display_name)
+            st.success("Lokale Sitzung gestartet.")
+            st.rerun()
         return
     st.markdown("### LOGIN")
     mode = st.radio("Login-Modus", ["Einloggen", "Registrieren"], horizontal=True, key=f"{prefix}_mode")
@@ -129,6 +155,8 @@ def render_auth_box(key_prefix: str | None = None) -> None:
 def load_user_position() -> PositionSettings:
     client = get_supabase_client()
     user = current_user()
+    if user and not client:
+        return PositionSettings.from_dict(st.session_state.get("local_position"))
     if not client or not user:
         return PositionSettings()
     try:
@@ -144,6 +172,9 @@ def load_user_position() -> PositionSettings:
 def save_user_position(position: PositionSettings) -> bool:
     client = get_supabase_client()
     user = current_user()
+    if user and not client:
+        st.session_state["local_position"] = position.to_dict()
+        return True
     if not client or not user:
         st.warning("Nicht angemeldet oder Supabase nicht konfiguriert.")
         return False
