@@ -31,7 +31,7 @@ from formatting import fmt_datetime_utc, fmt_eur, fmt_number, fmt_pct, fmt_usd, 
 from macro_monitor import build_macro_monitor
 from market_intelligence import build_market_intelligence
 from market_signals import build_market_signal_report, signal_rows
-from news_fetcher import fetch_news
+from news_fetcher import build_news_impact_report, fetch_news
 from portfolio import PositionSettings, compute_portfolio
 from user_profile import (
     ScenarioPreferences,
@@ -314,6 +314,23 @@ def cached_news() -> list[dict]:
             "category": "System",
             "classification": "🟡 Neutral",
         }]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_news_impact() -> dict:
+    try:
+        items = fetch_news(max_items_per_feed=3, max_total=25)
+        return build_news_impact_report(items)
+    except Exception as exc:
+        return {
+            "score": 50,
+            "label": f"News neutral: {exc}",
+            "positive_count": 0,
+            "risk_count": 0,
+            "net_impact": 0.0,
+            "reasons_positive": [],
+            "reasons_risk": [],
+        }
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -603,47 +620,52 @@ def render_overview_tab(df, latest, past, result, live, wallet_summary, portfoli
 
     signal_report = cached_overview_market_timing()
     macro_data = cached_macro_monitor()
+    news_impact = cached_news_impact()
     market_score = safe_float(signal_report.get("timing_score"), 50)
     macro_score_value = safe_float(macro_data.get("score"), 50)
-    composite = round(score * 0.55 + market_score * 0.25 + macro_score_value * 0.20, 1)
+    news_score = safe_float(news_impact.get("score"), 50)
+    composite = round(score * 0.50 + market_score * 0.23 + macro_score_value * 0.17 + news_score * 0.10, 1)
     composite_label = _composite_label(composite)
     macro_label = str(macro_data.get("label") or "Macro neutral / beobachten")
     market_label = str(signal_report.get("label") or "neutral")
+    news_label = str(news_impact.get("label") or "neutral")
 
     st.markdown("<div class='sol-section-title'>Command Center</div>", unsafe_allow_html=True)
     st.markdown(
         f"""
 <div class="sol-summary-box">
   {_score_badge(composite)} <b>Gesamtlage: {composite_label}</b> · Composite Score <b>{composite:.0f}/100</b><br/>
-  {_score_badge(score)} Fundamental Thesis: <b>{score:.0f}/100</b> · {_score_badge(market_score)} Market Timing: <b>{market_score:.0f}/100</b> · {_score_badge(macro_score_value)} Macro: <b>{macro_score_value:.0f}/100</b>
+  {_score_badge(score)} Fundamental Thesis: <b>{score:.0f}/100</b> · {_score_badge(market_score)} Market Timing: <b>{market_score:.0f}/100</b> · {_score_badge(macro_score_value)} Macro: <b>{macro_score_value:.0f}/100</b> · {_score_badge(news_score)} News: <b>{news_score:.0f}/100</b>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
     score_cards = [
-        ("Composite", f"{composite:.0f}/100", f"{_score_badge_text(composite)} · 55% Thesis · 25% Timing · 20% Macro", _composite_tone(composite)),
+        ("Composite", f"{composite:.0f}/100", f"{_score_badge_text(composite)} · inkl. News Impact", _composite_tone(composite)),
         ("Fundamental Thesis", f"{score:.0f}/100", f"{_score_badge_text(score)} · Solana-These {status_text}", _status_tone(status)),
         ("Market Timing", f"{market_score:.0f}/100", f"{_score_badge_text(market_score)} · {market_label}", _tone_for_score(market_score)),
         ("Macro", f"{macro_score_value:.0f}/100", f"{_score_badge_text(macro_score_value)} · {macro_label}", _tone_for_score(macro_score_value)),
+        ("News Impact", f"{news_score:.0f}/100", f"{_score_badge_text(news_score)} · {news_label}", _tone_for_score(news_score)),
     ]
-    cols = st.columns(4)
+    cols = st.columns(5)
     for col, (label, value, caption, tone) in zip(cols, score_cards):
         with col:
             render_native_card(label, value, caption, tone)
 
     st.progress(max(0, min(int(composite), 100)) / 100)
     st.caption(
-        "Composite Score = 55% Fundamental Thesis, 25% Market Timing, 20% Macro. "
+        "Composite Score = 50% Fundamental Thesis, 23% Market Timing, 17% Macro, 10% News Impact. "
         "Der Fundamental Score bleibt die Langfrist-These; das schnelle Overview-Timing nutzt Coinbase-Kerzen. "
-        "Der volle Derivatives/Sentiment-Report lädt erst im Reiter Market Signals."
+        "News Impact gewichtet Kryptovergleich, Aktualität, Kategorie und Signalrichtung."
     )
 
     st.markdown("### Score-Mix")
     mix_rows = [
-        _score_line("Fundamental Thesis", score, 55, interpretation_text(result)),
-        _score_line("Market Timing", market_score, 25, f"Timing-/Risiko-Lage: {market_label}."),
-        _score_line("Macro Monitor", macro_score_value, 20, macro_label),
+        _score_line("Fundamental Thesis", score, 50, interpretation_text(result)),
+        _score_line("Market Timing", market_score, 23, f"Timing-/Risiko-Lage: {market_label}."),
+        _score_line("Macro Monitor", macro_score_value, 17, macro_label),
+        _score_line("News Impact", news_score, 10, news_label),
     ]
     st.dataframe(pd.DataFrame(mix_rows), hide_index=True, use_container_width=True)
 
@@ -1293,6 +1315,7 @@ def render_news_tab() -> None:
     if not items:
         st.info("Aktuell wurden keine News geladen.")
         return
+    impact = build_news_impact_report(items)
 
     cats = sorted({str(i.get("category") or "Allgemein") for i in items})
     sources = sorted({str(i.get("source") or "Quelle") for i in items})
@@ -1315,11 +1338,23 @@ def render_news_tab() -> None:
             continue
         filtered.append(item)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Artikel geladen", len(items))
-    c2.metric("Gefiltert", len(filtered))
-    c3.metric("Positiv", sum(1 for i in items if i.get("classification") == "🟢 Positiv"))
-    c4.metric("Risiken", sum(1 for i in items if i.get("classification") == "🔴 Risiko"))
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("News Impact", f"{impact.get('score', 50):.0f}/100", impact.get("label"))
+    c2.metric("Artikel geladen", len(items))
+    c3.metric("Gefiltert", len(filtered))
+    c4.metric("Positiv", sum(1 for i in items if i.get("classification") == "🟢 Positiv"))
+    c5.metric("Risiken", sum(1 for i in items if i.get("classification") == "🔴 Risiko"))
+    c6.metric("Net Impact", f"{safe_float(impact.get('net_impact'), 0):+.1f}")
+
+    reason_cols = st.columns(2)
+    with reason_cols[0]:
+        st.markdown("### Positive News-Treiber")
+        for reason in impact.get("reasons_positive") or ["Keine starken positiven News-Treiber erkannt."]:
+            st.success(reason)
+    with reason_cols[1]:
+        st.markdown("### News-Risiken")
+        for reason in impact.get("reasons_risk") or ["Keine starken News-Risiken erkannt."]:
+            st.warning(reason)
 
     for item in filtered:
         title = str(item.get("title") or "Ohne Titel")

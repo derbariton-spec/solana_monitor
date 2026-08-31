@@ -49,6 +49,17 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "Risk": NEGATIVE_KEYWORDS,
 }
 
+CATEGORY_IMPACT_WEIGHTS = {
+    "ETF / Institutional": 1.35,
+    "RWA / Stablecoins": 1.25,
+    "Tech / Network": 1.25,
+    "Risk": 1.35,
+    "DeFi / Ecosystem": 1.10,
+    "Market / Price": 0.95,
+    "Allgemein": 0.75,
+    "System": 0.0,
+}
+
 
 def _clean_text(value: str | None) -> str:
     if not value:
@@ -125,6 +136,98 @@ def categorize_news(title: str, summary: str = "", source: str = "") -> str:
             best_category = category
             best_hits = hits
     return best_category
+
+
+def _freshness_weight(published_ts: Any) -> float:
+    ts = 0.0
+    try:
+        ts = float(published_ts or 0.0)
+    except Exception:
+        return 0.55
+    if ts <= 0:
+        return 0.55
+    age_hours = max((datetime.now(timezone.utc).timestamp() - ts) / 3600, 0)
+    if age_hours <= 24:
+        return 1.0
+    if age_hours <= 72:
+        return 0.80
+    if age_hours <= 168:
+        return 0.60
+    return 0.40
+
+
+def _source_weight(source: str) -> float:
+    source_l = source.lower()
+    if "kryptovergleich" in source_l:
+        return 1.35
+    if "google news" in source_l:
+        return 1.0
+    if "reddit" in source_l:
+        return 0.55
+    return 0.85
+
+
+def _impact_points(item: dict[str, Any]) -> float:
+    classification = str(item.get("classification") or "")
+    if "Positiv" in classification:
+        direction = 1.0
+    elif "Risiko" in classification:
+        direction = -1.15
+    else:
+        direction = 0.0
+
+    category = str(item.get("category") or "Allgemein")
+    source = str(item.get("source") or "")
+    magnitude = CATEGORY_IMPACT_WEIGHTS.get(category, 0.8)
+    return direction * magnitude * _source_weight(source) * _freshness_weight(item.get("published_ts"))
+
+
+def build_news_impact_report(items: list[dict[str, Any]], max_reasons: int = 3) -> dict[str, Any]:
+    relevant = [item for item in items if str(item.get("category") or "") != "System"]
+    if not relevant:
+        return {
+            "score": 50,
+            "label": "neutral",
+            "positive_count": 0,
+            "risk_count": 0,
+            "net_impact": 0.0,
+            "reasons_positive": [],
+            "reasons_risk": [],
+        }
+
+    scored = [(item, _impact_points(item)) for item in relevant]
+    net = sum(points for _, points in scored)
+    score = round(max(10, min(90, 50 + net * 4)))
+
+    if score >= 68:
+        label = "News Rückenwind"
+    elif score >= 55:
+        label = "leicht positiv"
+    elif score <= 32:
+        label = "News Risiko"
+    elif score <= 45:
+        label = "leicht negativ"
+    else:
+        label = "neutral"
+
+    positives = sorted(((item, points) for item, points in scored if points > 0), key=lambda row: row[1], reverse=True)
+    risks = sorted(((item, points) for item, points in scored if points < 0), key=lambda row: row[1])
+
+    return {
+        "score": score,
+        "label": label,
+        "positive_count": sum(1 for item in relevant if item.get("classification") == "🟢 Positiv"),
+        "risk_count": sum(1 for item in relevant if item.get("classification") == "🔴 Risiko"),
+        "net_impact": round(net, 2),
+        "reasons_positive": [
+            f"{item.get('category', 'Allgemein')}: {item.get('title', 'Ohne Titel')}"
+            for item, _ in positives[:max_reasons]
+        ],
+        "reasons_risk": [
+            f"{item.get('category', 'Allgemein')}: {item.get('title', 'Ohne Titel')}"
+            for item, _ in risks[:max_reasons]
+        ],
+    }
 
 
 def _json_ld_objects(page_html: str) -> list[Any]:
