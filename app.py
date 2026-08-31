@@ -5,7 +5,6 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from PIL import Image
 
 from accumulation_alert import accumulation_alert_rows, build_accumulation_alert
 from auth import current_user, is_logged_in, load_user_position, render_auth_box, render_logged_in_box, save_user_position
@@ -59,6 +58,8 @@ from wallet import fetch_wallet_summary
 
 APP_ICON_PATH = Path(__file__).parent / "assets" / "app-icon.png"
 try:
+    from PIL import Image
+
     PAGE_ICON = Image.open(APP_ICON_PATH) if APP_ICON_PATH.exists() else "🟣"
 except Exception:
     PAGE_ICON = "🟣"
