@@ -204,7 +204,10 @@ def load_recent_notes(limit: int = 20) -> list[dict[str, Any]]:
 
 def save_daily_note(note_date: str, note: str) -> bool:
     if _local_user_active():
-        notes = [row for row in st.session_state.get(_local_key("user_notes"), []) if row.get("note_date") != note_date]
+        current_notes = st.session_state.get(_local_key("user_notes"), [])
+        if not isinstance(current_notes, list):
+            current_notes = []
+        notes = [row for row in current_notes if row.get("note_date") != note_date]
         if note.strip():
             notes.insert(0, {"note_date": note_date, "note": note.strip(), "created_at": "lokale Session"})
         st.session_state[_local_key("user_notes")] = notes
