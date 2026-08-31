@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-def render_candlestick_chart(candles: pd.DataFrame, title: str = "SOL/USD") -> None:
+def render_candlestick_chart(candles: pd.DataFrame, title: str = "SOL/USD", levels: list[dict] | None = None) -> None:
     if candles is None or candles.empty:
         st.info("Keine Kerzendaten verfügbar.")
         return
@@ -28,6 +28,17 @@ def render_candlestick_chart(candles: pd.DataFrame, title: str = "SOL/USD") -> N
         margin=dict(l=10, r=10, t=50, b=10),
         yaxis_title="USD",
     )
+    for level in levels or []:
+        value = level.get("value")
+        if value is None:
+            continue
+        fig.add_hline(
+            y=float(value),
+            line_dash=level.get("dash", "dot"),
+            line_color=level.get("color", "#7c3aed"),
+            annotation_text=level.get("label", ""),
+            annotation_position="right",
+        )
     st.plotly_chart(fig, use_container_width=True)
 
 

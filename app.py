@@ -7,6 +7,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 
+from accumulation_alert import accumulation_alert_rows, build_accumulation_alert
 from auth import current_user, is_logged_in, load_user_position, render_auth_box, render_logged_in_box, save_user_position
 from charts import render_candlestick_chart, render_line_history
 from config import (
@@ -275,6 +276,12 @@ def cached_current_fundamentals() -> dict:
 @st.cache_data(ttl=60, show_spinner=False)
 def cached_candles(days: int, granularity: int) -> pd.DataFrame:
     return fetch_coinbase_candles(DEFAULT_PRODUCT_ID, days=days, granularity=granularity)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_accumulation_alert(live_price: float | None) -> dict:
+    candles = fetch_coinbase_candles(DEFAULT_PRODUCT_ID, days=240, granularity=86400)
+    return build_accumulation_alert(candles, live_price=live_price)
 
 
 @st.cache_data(ttl=90, show_spinner=False)
@@ -557,6 +564,16 @@ def _composite_tone(score: float) -> str:
     return "bad"
 
 
+def _tone_for_accumulation_status(status: str | None) -> str:
+    if status == "active":
+        return "good"
+    if status == "watch":
+        return "warn"
+    if status == "risk":
+        return "bad"
+    return "info"
+
+
 def _score_badge(score: float | None) -> str:
     value = safe_float(score, None)
     if value is None:
@@ -621,6 +638,7 @@ def render_overview_tab(df, latest, past, result, live, wallet_summary, portfoli
     signal_report = cached_overview_market_timing()
     macro_data = cached_macro_monitor()
     news_impact = cached_news_impact()
+    accumulation_alert = cached_accumulation_alert(safe_float(live.get("sol_usd"), None))
     market_score = safe_float(signal_report.get("timing_score"), 50)
     macro_score_value = safe_float(macro_data.get("score"), 50)
     news_score = safe_float(news_impact.get("score"), 50)
@@ -658,6 +676,21 @@ def render_overview_tab(df, latest, past, result, live, wallet_summary, portfoli
         "Composite Score = 50% Fundamental Thesis, 23% Market Timing, 17% Macro, 10% News Impact. "
         "Der Fundamental Score bleibt die Langfrist-These; das schnelle Overview-Timing nutzt Coinbase-Kerzen. "
         "News Impact gewichtet Kryptovergleich, Aktualität, Kategorie und Signalrichtung."
+    )
+
+    if accumulation_alert.get("ok"):
+        accumulation_value = f"${safe_float(accumulation_alert.get('fib_618'), 0):.2f}"
+        accumulation_caption = (
+            f"{accumulation_alert.get('label')} · Abstand {safe_float(accumulation_alert.get('distance_pct'), 0):+.2f}%"
+        )
+    else:
+        accumulation_value = "n/a"
+        accumulation_caption = str(accumulation_alert.get("label") or "Nachkauf-Alert nicht verfügbar")
+    render_native_card(
+        "Nachkauf-Alert 61,8%",
+        accumulation_value,
+        accumulation_caption,
+        _tone_for_accumulation_status(str(accumulation_alert.get("status") or "")),
     )
 
     st.markdown("### Score-Mix")
@@ -832,8 +865,30 @@ def render_market_tab(live: dict) -> None:
     days = CANDLE_RANGES[range_label]
     granularity = CANDLE_INTERVALS[interval_label]
     candles = cached_candles(days, granularity)
-    render_candlestick_chart(candles, f"SOL/USD · Coinbase · {range_label} · {interval_label}")
+    accumulation_alert = cached_accumulation_alert(safe_float(live.get("sol_usd"), None))
+    retracement_levels = []
+    if accumulation_alert.get("ok"):
+        retracement_levels = [
+            {"value": accumulation_alert.get("fib_50"), "label": "50,0%", "color": "#64748b"},
+            {"value": accumulation_alert.get("fib_618"), "label": "61,8% Nachkaufzone", "color": "#16a34a", "dash": "dash"},
+            {"value": accumulation_alert.get("fib_786"), "label": "78,6% Risiko prüfen", "color": "#dc2626"},
+        ]
+    render_candlestick_chart(candles, f"SOL/USD · Coinbase · {range_label} · {interval_label}", levels=retracement_levels)
     st.caption("Coinbase begrenzt Kerzenabfragen. Bei kleinen Intervallen kann der dargestellte Zeitraum automatisch gekürzt werden.")
+
+    st.markdown("### Nachkauf-Alert")
+    if accumulation_alert.get("ok"):
+        status = str(accumulation_alert.get("status") or "")
+        message = str(accumulation_alert.get("message") or "")
+        if status == "active":
+            st.success(message)
+        elif status == "risk":
+            st.warning(message)
+        else:
+            st.info(message)
+        st.dataframe(pd.DataFrame(accumulation_alert_rows(accumulation_alert)), hide_index=True, use_container_width=True)
+    else:
+        st.info(accumulation_alert.get("message") or "Nachkauf-Alert derzeit nicht verfügbar.")
 
     st.divider()
     st.subheader("Live-Markt")
