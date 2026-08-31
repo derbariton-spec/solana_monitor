@@ -848,14 +848,14 @@ def render_market_signals_tab(latest: dict | None, past: dict | None) -> None:
     )
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def cached_macro_monitor() -> dict:
     return build_macro_monitor()
 
 
 def render_macro_monitor_tab() -> None:
     st.subheader("🌐 Macro Monitor")
-    st.caption("US-Staatsanleihen, Inflation, Öl, Dollar, FedWatch-Link und geopolitischer News-Risiko-Scan.")
+    st.caption("Schneller Live-Macro-Check: BTC, Aktienmarkt, VIX, Dollar, Renditen, Gold, Öl, Inflation und geopolitischer News-Scan.")
 
     data = cached_macro_monitor()
     score = safe_float(data.get("score"), 50)
@@ -867,12 +867,14 @@ def render_macro_monitor_tab() -> None:
     c2.metric("Geopolitik", str(geo.get("status") or "n/a"), str(geo.get("reading") or ""))
     c3.metric("Risk Headlines", str(geo.get("risk_hits", 0)), "News-Scan")
     c4.link_button("CME FedWatch öffnen", data.get("fedwatch_url") or "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html", use_container_width=True)
+    if data.get("updated_at"):
+        st.caption(f"Macro-Daten zuletzt geladen: {data.get('updated_at')}")
 
     st.markdown("### Macro Layers")
     rows = data.get("rows") or []
     if rows:
         macro_df = pd.DataFrame(rows)
-        visible_cols = [col for col in ["Layer", "Wert", "Vortag", "Status", "Lesart", "Quelle"] if col in macro_df.columns]
+        visible_cols = [col for col in ["Layer", "Wert", "Vortag", "Status", "Lesart", "Quelle", "Stand"] if col in macro_df.columns]
         compare_rows = macro_df[macro_df["Vortag"].astype(str).ne("Monatswert")] if "Vortag" in macro_df.columns else pd.DataFrame()
         if not compare_rows.empty:
             st.markdown("#### Vortagesvergleich")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -21,12 +22,18 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 CME_FEDWATCH_URL = "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"
+MACRO_REQUEST_TIMEOUT = 7
 
 MACRO_QUOTES = {
+    "btc": {"symbol": "BTC-USD", "label": "Bitcoin", "kind": "usd"},
+    "sp500": {"symbol": "^GSPC", "label": "S&P 500", "kind": "number"},
+    "nasdaq": {"symbol": "^IXIC", "label": "Nasdaq", "kind": "number"},
+    "vix": {"symbol": "^VIX", "label": "VIX", "kind": "number"},
+    "gold": {"symbol": "GC=F", "label": "Gold", "kind": "usd"},
     "wti_oil": {"fred_id": "DCOILWTICO", "symbol": "CL=F", "stooq_symbol": "cl.f", "label": "WTI Oil", "kind": "usd"},
     "brent_oil": {"fred_id": "DCOILBRENTEU", "symbol": "BZ=F", "stooq_symbol": "bz.f", "label": "Brent Oil", "kind": "usd"},
-    "dxy": {"fred_id": "DTWEXBGS", "symbol": "DX-Y.NYB", "stooq_symbol": "dx.f", "label": "Trade Weighted US Dollar", "kind": "number"},
-    "us_2y": {"fred_id": "DGS2", "symbol": "^IRX", "stooq_symbol": "2usy.b", "label": "US 2Y Yield", "kind": "pct"},
+    "dxy": {"fred_id": "DTWEXBGS", "symbol": "DX-Y.NYB", "stooq_symbol": "dx.f", "label": "US Dollar Index", "kind": "number"},
+    "us_13w": {"symbol": "^IRX", "label": "US 13W Yield", "kind": "pct"},
     "us_10y": {"fred_id": "DGS10", "symbol": "^TNX", "stooq_symbol": "10usy.b", "label": "US 10Y Yield", "kind": "pct"},
 }
 
@@ -42,9 +49,9 @@ GEOPOLITICAL_RISK_WORDS = [
 ]
 
 
-def _get(url: str, params: dict[str, Any] | None = None) -> requests.Response | None:
+def _get(url: str, params: dict[str, Any] | None = None, timeout: int = MACRO_REQUEST_TIMEOUT) -> requests.Response | None:
     try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
         response.raise_for_status()
         return response
     except Exception:
@@ -63,7 +70,7 @@ def _get_json(url: str, params: dict[str, Any] | None = None) -> Any | None:
 
 def _post_json(url: str, payload: dict[str, Any]) -> Any | None:
     try:
-        response = requests.post(url, json=payload, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        response = requests.post(url, json=payload, headers=HEADERS, timeout=MACRO_REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.json()
     except Exception:
@@ -172,27 +179,52 @@ def fetch_yahoo_quote(symbol: str, label: str, kind: str = "number") -> dict[str
 
 
 def fetch_macro_quote(meta: dict[str, Any]) -> dict[str, Any]:
+    # Use Yahoo first for the interactive app: it is current enough for market
+    # context and much faster than FRED from some Streamlit Cloud regions.
+    yahoo = fetch_yahoo_quote(meta["symbol"], meta["label"], meta["kind"])
+    if yahoo.get("ok"):
+        return yahoo
+
+    stooq_symbol = meta.get("stooq_symbol")
+    if stooq_symbol:
+        stooq = fetch_stooq_quote(stooq_symbol, meta["label"], meta["kind"])
+        if stooq.get("ok"):
+            stooq["source"] = "Stooq Fallback"
+            return stooq
+
     fred_id = meta.get("fred_id")
     if fred_id:
         fred = fetch_fred_quote(fred_id, meta["label"], meta["kind"])
         if fred.get("ok"):
+            fred["source"] = "FRED Fallback"
             return fred
-    yahoo = fetch_yahoo_quote(meta["symbol"], meta["label"], meta["kind"])
-    if yahoo.get("ok"):
-        return yahoo
-    stooq = fetch_stooq_quote(meta.get("stooq_symbol") or meta["symbol"], meta["label"], meta["kind"])
-    if stooq.get("ok"):
-        stooq["source"] = "Stooq Fallback"
-        return stooq
+
     yahoo["source"] = "Yahoo/Stooq nicht erreichbar"
     return yahoo
 
 
 def fetch_macro_quotes() -> dict[str, dict[str, Any]]:
-    return {
-        key: fetch_macro_quote(meta)
-        for key, meta in MACRO_QUOTES.items()
-    }
+    quotes: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(MACRO_QUOTES))) as executor:
+        future_map = {executor.submit(fetch_macro_quote, meta): key for key, meta in MACRO_QUOTES.items()}
+        for future in as_completed(future_map):
+            key = future_map[future]
+            try:
+                quotes[key] = future.result()
+            except Exception as exc:
+                quotes[key] = {
+                    "ok": False,
+                    "key": key,
+                    "label": MACRO_QUOTES[key]["label"],
+                    "value": None,
+                    "previous_value": None,
+                    "change_pct": None,
+                    "kind": MACRO_QUOTES[key]["kind"],
+                    "date": None,
+                    "source": f"Fehler: {exc}",
+                    "source_url": "",
+                }
+    return quotes
 
 
 def fetch_cpi() -> dict[str, Any]:
@@ -303,13 +335,31 @@ def _status_from_quote(key: str, quote: dict[str, Any]) -> tuple[str, str]:
     change = safe_float(quote.get("change_pct"), None)
     if value is None:
         return "⚪ n/a", "Quelle nicht erreichbar"
+    if key in {"btc", "sp500", "nasdaq"}:
+        if change is not None and change <= -2:
+            return "🔴 Risk-off", "Risk Assets fallen deutlich; Crypto-Gegenwind"
+        if change is not None and change >= 1:
+            return "🟢 Risk-on", "Risk Assets steigen; Liquiditätsbild freundlicher"
+        return "🟡 Neutral", "Risk Assets ohne extremes Signal"
+    if key == "vix":
+        if value >= 25 or (change is not None and change > 8):
+            return "🔴 Volatility spike", "VIX erhöht; Risk-off-Gefahr"
+        if value <= 16 and (change is None or change < 4):
+            return "🟢 Calm", "Volatilität niedrig; Risk Assets weniger belastet"
+        return "🟡 Watch", "Volatilität beobachten"
+    if key == "gold":
+        if change is not None and change > 1.5:
+            return "🟡 Safe-haven bid", "Gold steigt; Absicherungsnachfrage beobachten"
+        if change is not None and change < -1:
+            return "🟢 Risk appetite", "Gold fällt; weniger Flucht in sichere Häfen"
+        return "🟡 Neutral", "Gold ohne klares Stresssignal"
     if key in {"wti_oil", "brent_oil"}:
         if change is not None and change > 3:
             return "🔴 Oil shock risk", "Öl steigt stark; Inflation/Risk-off beobachten"
         if change is not None and change < -2:
             return "🟢 Easing", "Öl fällt; Makro-Druck nimmt ab"
         return "🟡 Stable", "Ölpreis ohne extremes Tagesrisiko"
-    if key in {"us_2y", "us_10y"}:
+    if key in {"us_13w", "us_10y"}:
         if change is not None and change > 1:
             return "🔴 Yield pressure", "Renditen steigen; Growth/Crypto Gegenwind"
         if change is not None and change < -1:
@@ -339,7 +389,7 @@ def _change_text(kind: str | None, current: Any, previous: Any, change_pct: Any)
 
 def macro_rows(quotes: dict[str, dict[str, Any]], cpi: dict[str, Any]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    for key in ("wti_oil", "brent_oil", "us_2y", "us_10y", "dxy"):
+    for key in ("btc", "sp500", "nasdaq", "vix", "dxy", "us_13w", "us_10y", "gold", "wti_oil", "brent_oil"):
         quote = quotes.get(key, {})
         status, reading = _status_from_quote(key, quote)
         kind = quote.get("kind")
@@ -358,6 +408,7 @@ def macro_rows(quotes: dict[str, dict[str, Any]], cpi: dict[str, Any]) -> list[d
             "Status": status,
             "Lesart": reading,
             "Quelle": quote.get("source", "n/a"),
+            "Stand": str(quote.get("date") or "live/letzter Marktpreis"),
         })
 
     yoy = safe_float(cpi.get("yoy_pct"), None)
@@ -380,6 +431,7 @@ def macro_rows(quotes: dict[str, dict[str, Any]], cpi: dict[str, Any]) -> list[d
         "Status": status,
         "Lesart": reading,
         "Quelle": cpi.get("source", "BLS"),
+        "Stand": str(cpi.get("period") or "Monatswert"),
     })
     return rows
 
@@ -400,17 +452,24 @@ def geopolitical_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 def macro_score(rows: list[dict[str, str]], geo: dict[str, Any]) -> tuple[int, str]:
     score = 50
-    joined = " ".join(f"{row.get('Status','')} {row.get('Lesart','')}" for row in rows).lower()
-    score -= joined.count("🔴") * 10
-    score += joined.count("🟢") * 7
+    for row in rows:
+        status = str(row.get("Status", ""))
+        layer = str(row.get("Layer", "")).lower()
+        if status.startswith("🔴"):
+            if any(word in layer for word in ("yield", "oil", "vix")):
+                score -= 7
+            else:
+                score -= 5
+        elif status.startswith("🟢"):
+            score += 5
     if str(geo.get("status", "")).startswith("🔴"):
-        score -= 12
+        score -= 8
     elif str(geo.get("status", "")).startswith("🟢"):
-        score += 5
+        score += 4
     score = max(0, min(100, score))
     if score >= 65:
         label = "Macro Rückenwind"
-    elif score >= 45:
+    elif score >= 38:
         label = "Macro neutral / beobachten"
     else:
         label = "Macro Gegenwind"
@@ -418,9 +477,28 @@ def macro_score(rows: list[dict[str, str]], geo: dict[str, Any]) -> tuple[int, s
 
 
 def build_macro_monitor() -> dict[str, Any]:
-    quotes = fetch_macro_quotes()
-    cpi = fetch_cpi()
-    news = fetch_geopolitical_news()
+    started = datetime.now(timezone.utc)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        quotes_future = executor.submit(fetch_macro_quotes)
+        cpi_future = executor.submit(fetch_cpi)
+        news_future = executor.submit(fetch_geopolitical_news, 3, 10)
+        quotes = quotes_future.result()
+        try:
+            cpi = cpi_future.result(timeout=MACRO_REQUEST_TIMEOUT + 2)
+        except Exception:
+            cpi = {
+                "ok": False,
+                "label": "US CPI",
+                "value": None,
+                "yoy_pct": None,
+                "period": "n/a",
+                "source": "BLS Timeout",
+                "source_url": "https://www.bls.gov/cpi/",
+            }
+        try:
+            news = news_future.result(timeout=MACRO_REQUEST_TIMEOUT + 2)
+        except Exception:
+            news = []
     rows = macro_rows(quotes, cpi)
     geo = geopolitical_summary(news)
     score, label = macro_score(rows, geo)
@@ -431,4 +509,5 @@ def build_macro_monitor() -> dict[str, Any]:
         "geopolitics": geo,
         "news": news,
         "fedwatch_url": CME_FEDWATCH_URL,
+        "updated_at": started.strftime("%Y-%m-%d %H:%M UTC"),
     }
