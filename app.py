@@ -46,7 +46,7 @@ from user_profile import (
     save_user_profile,
     save_watch_levels,
 )
-from quality import build_data_quality_rows, quality_summary
+from quality import build_data_quality_rows, build_source_status_rows, quality_summary, source_status_summary
 from reports import weekly_report_rows
 from risk import build_risk_rows
 from scenario import DEFAULT_TARGETS, build_price_scenarios
@@ -698,6 +698,16 @@ def render_overview_tab(df, latest, past, result, live, wallet_summary, portfoli
         st.markdown("### Datenabdeckung")
         quality_rows = build_data_quality_rows(latest, df, live, wallet_summary)
         st.write(quality_summary(quality_rows))
+        source_rows = build_source_status_rows(latest, df, live, news_impact, macro_data, wallet_summary)
+        source_warnings = [
+            row["Quelle"]
+            for row in source_rows
+            if str(row.get("Status", "")).startswith(("❌", "⚠️")) and "optional" not in str(row.get("Status", "")).lower()
+        ]
+        if source_warnings:
+            st.warning("Quellen prüfen: " + ", ".join(source_warnings[:3]))
+        else:
+            st.success("Wichtige Quellen aktiv.")
         if latest is not None:
             st.caption(f"Letzter Fundamentaldaten-Snapshot: {latest.get('snapshot_date')}")
 
@@ -1191,9 +1201,18 @@ def render_fundamentals_tab(df, latest, prev, result) -> None:
 
 def render_quality_tab(df, latest, live, wallet_summary) -> None:
     st.subheader("Datenqualität")
+    macro_data = cached_macro_monitor()
+    news_impact = cached_news_impact()
+
+    source_rows = build_source_status_rows(latest, df, live, news_impact, macro_data, wallet_summary)
+    st.markdown("### Quellenstatus")
+    st.info(source_status_summary(source_rows))
+    st.dataframe(pd.DataFrame(source_rows).astype(str), hide_index=True, use_container_width=True)
+
+    st.markdown("### Score-Datenqualität")
     rows = build_data_quality_rows(latest, df, live, wallet_summary)
     st.info(quality_summary(rows))
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows).astype(str), hide_index=True, use_container_width=True)
 
 
 def render_thesis_tab(df, latest, result) -> None:
