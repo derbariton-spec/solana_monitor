@@ -92,7 +92,20 @@ def _client_and_user():
     return client, user
 
 
+def _local_user_active() -> bool:
+    from auth import current_user, get_supabase_client
+
+    return bool(current_user()) and get_supabase_client() is None
+
+
+def _local_key(table: str) -> str:
+    return f"local_{table}"
+
+
 def _load_single(table: str) -> dict[str, Any] | None:
+    if _local_user_active():
+        value = st.session_state.get(_local_key(table))
+        return value if isinstance(value, dict) else None
     client, user = _client_and_user()
     if not client or not user:
         return None
@@ -106,9 +119,12 @@ def _load_single(table: str) -> dict[str, Any] | None:
 
 
 def _upsert_single(table: str, payload: dict[str, Any]) -> bool:
+    if _local_user_active():
+        st.session_state[_local_key(table)] = dict(payload)
+        return True
     client, user = _client_and_user()
     if not client or not user:
-        st.warning("Bitte anmelden, um persönliche Einstellungen zu speichern.")
+        st.warning("Bitte anmelden oder lokale Sitzung starten, um persönliche Einstellungen zu speichern.")
         return False
     try:
         payload["user_id"] = user["id"]
@@ -125,8 +141,11 @@ def load_user_profile() -> UserProfile:
 
 def save_user_profile(profile: UserProfile) -> bool:
     client, user = _client_and_user()
+    if _local_user_active():
+        st.session_state[_local_key("user_profiles")] = asdict(profile)
+        return True
     if not client or not user:
-        st.warning("Bitte anmelden, um dein Profil zu speichern.")
+        st.warning("Bitte anmelden oder lokale Sitzung starten, um dein Profil zu speichern.")
         return False
     return _upsert_single("user_profiles", profile.to_payload(user["id"]))
 
@@ -137,8 +156,11 @@ def load_watch_levels() -> WatchLevels:
 
 def save_watch_levels(levels: WatchLevels) -> bool:
     client, user = _client_and_user()
+    if _local_user_active():
+        st.session_state[_local_key("user_watch_levels")] = asdict(levels)
+        return True
     if not client or not user:
-        st.warning("Bitte anmelden, um Watch-Level zu speichern.")
+        st.warning("Bitte anmelden oder lokale Sitzung starten, um Watch-Level zu speichern.")
         return False
     return _upsert_single("user_watch_levels", levels.to_payload(user["id"]))
 
@@ -149,13 +171,19 @@ def load_scenario_preferences() -> ScenarioPreferences:
 
 def save_scenario_preferences(prefs: ScenarioPreferences) -> bool:
     client, user = _client_and_user()
+    if _local_user_active():
+        st.session_state[_local_key("user_scenarios")] = asdict(prefs)
+        return True
     if not client or not user:
-        st.warning("Bitte anmelden, um Szenarien zu speichern.")
+        st.warning("Bitte anmelden oder lokale Sitzung starten, um Szenarien zu speichern.")
         return False
     return _upsert_single("user_scenarios", prefs.to_payload(user["id"]))
 
 
 def load_recent_notes(limit: int = 20) -> list[dict[str, Any]]:
+    if _local_user_active():
+        notes = st.session_state.get(_local_key("user_notes"), [])
+        return list(notes)[:limit] if isinstance(notes, list) else []
     client, user = _client_and_user()
     if not client or not user:
         return []
@@ -175,9 +203,15 @@ def load_recent_notes(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def save_daily_note(note_date: str, note: str) -> bool:
+    if _local_user_active():
+        notes = [row for row in st.session_state.get(_local_key("user_notes"), []) if row.get("note_date") != note_date]
+        if note.strip():
+            notes.insert(0, {"note_date": note_date, "note": note.strip(), "created_at": "lokale Session"})
+        st.session_state[_local_key("user_notes")] = notes
+        return True
     client, user = _client_and_user()
     if not client or not user:
-        st.warning("Bitte anmelden, um Notizen zu speichern.")
+        st.warning("Bitte anmelden oder lokale Sitzung starten, um Notizen zu speichern.")
         return False
     try:
         payload = {"user_id": user["id"], "note_date": note_date, "note": note}
