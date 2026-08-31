@@ -1471,6 +1471,35 @@ def render_history_tab(df) -> None:
     render_line_history(df, choice, options[choice])
 
 
+def navigation_groups(mode: str) -> dict[str, list[str]]:
+    if mode == "personal":
+        return {
+            "Start": ["Übersicht"],
+            "Mein Bereich": ["Portfolio", "Profil & Onboarding", "Szenarien", "Risiko"],
+            "Markt & Signale": ["Markt", "Market Signals", "Market Intelligence", "Liquidationen"],
+            "Makro & News": ["Macro Monitor", "News"],
+            "These & Daten": ["Fundamentals", "These", "Datenqualität", "Historie", "Rohdaten"],
+            "Berichte": ["Wochenbericht"],
+        }
+    return {
+        "Start": ["Übersicht"],
+        "Markt & Signale": ["Markt", "Market Signals", "Market Intelligence", "Liquidationen"],
+        "Makro & News": ["Macro Monitor", "News"],
+        "Investor": ["Szenarien", "Risiko", "These"],
+        "Daten": ["Fundamentals", "Datenqualität", "Historie", "Rohdaten"],
+        "Berichte": ["Wochenbericht"],
+    }
+
+
+def render_sidebar_navigation(mode: str) -> str:
+    groups = navigation_groups(mode)
+    st.sidebar.markdown("## Navigation")
+    active_group = st.sidebar.radio("Hauptbereich", list(groups.keys()), index=0, key="main_navigation_group")
+    current_page = st.sidebar.radio("Seite", groups[active_group], index=0, key=f"main_navigation_page_{active_group}")
+    st.sidebar.caption(f"{active_group}: {len(groups[active_group])} Bereiche")
+    return current_page
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -1488,18 +1517,7 @@ def main() -> None:
     if mode == "personal":
         render_onboarding_notice()
 
-    if mode == "personal":
-        tab_names = [
-            "Übersicht", "Market Intelligence", "Macro Monitor", "News", "Markt", "Market Signals", "Profil & Onboarding", "Portfolio", "Fundamentals", "Datenqualität",
-            "These", "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
-        ]
-    else:
-        tab_names = [
-            "Übersicht", "Market Intelligence", "Macro Monitor", "News", "Markt", "Market Signals", "Fundamentals", "Datenqualität", "These",
-            "Szenarien", "Risiko", "Wochenbericht", "Liquidationen", "Historie", "Rohdaten"
-        ]
-    st.sidebar.markdown("## Navigation")
-    current_page = st.sidebar.radio("Bereich", tab_names, index=0, key="main_navigation")
+    current_page = render_sidebar_navigation(mode)
     st.caption(f"Aktiver Bereich: {current_page}. Nur dieser Bereich wird geladen; andere Daten werden erst beim Öffnen abgefragt.")
 
     if current_page == "Übersicht":
